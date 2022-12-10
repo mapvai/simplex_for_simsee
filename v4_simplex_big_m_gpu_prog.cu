@@ -413,7 +413,6 @@ void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_
 	err = cudaGetLastError(); 
 	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 error", cudaGetErrorString(err));
 	
-	
 	const dim3 DimGrid_e3(NTrayectorias, 1);
 	const dim3 DimBlock_e3(BLOCK_SIZE_E_3X, BLOCK_SIZE_E_3Y);
 	kernel_resolver_etapa_agregar_variables_holgura_artificiales<<< DimGrid_e3, DimBlock_e3, 0, 0 >>>(d_simplex_array);
@@ -637,13 +636,6 @@ __device__ void resolver_simplex_big_m(TabloideGPUs &tabloide) {
 	__shared__ int zpos, qpos;
 	
 	it = 0;
-	
-	if (threadIdx.x == 0 && threadIdx.y == 0) {
-		printf("Tabloide inicial\n");
-		printStatusDev(simplex);
-		printf("FIN Tabloide inicial\n");
-	}
-	__syncthreads();
 	
 	do {
 		locate_min_dj(simplex, zpos);
