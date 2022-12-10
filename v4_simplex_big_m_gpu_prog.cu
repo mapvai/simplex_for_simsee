@@ -91,7 +91,6 @@ TabloideGPUs getTabloideCasoTipoGrande();
 void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
 
 int main() {
-	printf("Hello World from CPU!\n");
     
 	// resolver_ejemplo1();
 	
@@ -683,7 +682,7 @@ __device__ void locate_min_dj(TSimplexGPUs &smp, int &zpos) {
 	int thds_in_block = blockDim.y*blockDim.x;
 	double apz_accum; 
 	
-	// inicializo Cj - Zj con -Zj
+	// Calculo rj = Cj - Zj, inicializo con -Zj, cj = (CBase)T * (B)-1 = (CBase)T * B
 	for (unsigned int x = thd_indx; x < smp.var_all; x += thds_in_block){
 		apz_indx[x] = x;
 		top = smp.top[x] - 1;
@@ -727,7 +726,7 @@ __device__ void locate_min_dj(TSimplexGPUs &smp, int &zpos) {
 	// Condicion los hilos en el bloque deben ser mayor o igual que var_all, sino hay que agregar un bucle mas para que se procesen el resto del los valores en la reduccion
 	if (thd_indx == 0 && smp.var_all > 2*thds_in_block) printf("Condicion los hilos en el bloque deben ser mayor o igual que var_all/2 \n");
 	
-	// Reduccion
+	// Reduccion, elijo el mejor rj
 	// Reduccion Interleaved Addressing, OLD, la siguiente reduccion secuencial mejoro el rendimiento en un 18% aprox.
 	for (unsigned int s = 1; s < smp.var_all; s *= 2) {
 		int index = 2 * s * thd_indx;
