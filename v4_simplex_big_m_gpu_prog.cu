@@ -333,6 +333,9 @@ void resolver_ejemplo_caso_tipo_grande() {
 	
 	TabloideGPUs tabloide = getTabloideCasoTipoGrande();
 	
+	smp = desestructurarTabloide(tabloide);
+	printStatus(smp);
+	
 	int NTrayectorias = TRAYECTORIAS;
 	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
 	for (unsigned int t = 0; t < NTrayectorias; t++) {
@@ -351,7 +354,6 @@ void resolver_ejemplo_caso_tipo_grande() {
 	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
 	free(h_simplex_array);
 	free(tabloide);
-
 }
 
 void ini_mem(TDAOfSimplexGPUs simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias) {
@@ -548,7 +550,7 @@ __device__ void agregarRestriccionesCotaSup(TabloideGPUs &tabloide) {
 			qrest ++;
 		}
 	}
-	if (smp.rest_fin != qrest) printf("DISCREPANCIA EN LA CANTIDAD DE RESTRICCIONES FINAL\n");
+	if (threadIdx.x == 0 && threadIdx.y == 0 && smp.rest_fin != qrest) printf("DISCREPANCIA EN LA CANTIDAD DE RESTRICCIONES FINAL\n");
 	
 }
 
@@ -723,7 +725,7 @@ __device__ void locate_min_dj(TSimplexGPUs &smp, int &zpos) {
 		goto cargar_tile;
 	}
 	
-	// Condicion los hilos en el bloque deben ser mayor o igual que var_all, sino hay que agregar un bucle mas para que se procesen el resto del los valores en la reduccion
+	// Condicion los hilos en el bloque deben ser mayor o igual que var_all/2, sino hay que agregar un bucle mas para que se procesen el resto del los valores en la reduccion
 	if (thd_indx == 0 && smp.var_all > 2*thds_in_block) printf("Condicion los hilos en el bloque deben ser mayor o igual que var_all/2 \n");
 	
 	// Reduccion, elijo el mejor rj
