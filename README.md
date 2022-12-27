@@ -11,3 +11,11 @@ La version v3_simplex_big_m_cpu_prog implementa el algorimo Simplex variante Big
 
 La version v4_simplex_big_m_gpu_prog implementa el algorimo Simplex variante Big M en una programa c para GPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
 Esta version implementa ini_mem y free_mem dentro del programa.
+
+La version v5_simplex_big_m_2_cpu_prog implementa el algorimo Simplex BIG M Version 2, una version mejorada, en una programa c para CPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
+
+La version v6_simplex_big_m_2_gpu_prog implementa el algorimo Simplex BIG M Version 2, una version mejorada, en una programa c para GPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
+
+La version v7_simplex_two_phase_cpu_prog implementa el algorimo Simplex Two Phase, en una programa c para CPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
+
+La version v8_simplex_two_phase_gpu_prog implementa el algorimo Simplex Two Phase en una programa c para GPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
