@@ -1,109 +1,55 @@
 #include <stdio.h>
 #include <math.h>
-#include "simplex_big_m.h"
+#include <stdlib.h>		/* abs */
+#include <assert.h>	/* assert */
+#include <iostream>
+#include <string>
+using namespace std;
 
-__constant__ double CasiCero_Simplex = 1.0E-7;
-// const double MaxNReal = 1.7E+308; // Aprox, CONFIRMAR SI ESTO ES CORRECTO
+#include "simplex_big_m_2.h"
 
-__constant__ double M = 1.0E+15; // 1.0E+150; 100; //sqrt(MaxNReal);
-const double eMe = 1.0E+15; // 1.0E+150; 100;
+const double CasiCero_Simplex = 1.0E-7;
+// const double AsumaCero =  1.0E-16; // EPSILON de la maquina en cuentas con Double, CONFIRMAR SI ESTO ES CORRECTO (double 64 bits, 11 exponente y 53 mantisa, 53 log10(2) ˜ 15.955 => 2E-53 ˜ 1.11 × 10E-16 => EPSILON  ˜ 1.0E-16)
+const double MaxNReal = 1.7E+308; // Aprox, CONFIRMAR SI ESTO ES CORRECTO
 
-const int MAX_VARS = 512; // Esto sera usado para pedir shared memory
-const int MAX_RES = 512; // Esto sera usado para pedir shared memory
+const double M = 1.0E+15; //100; //sqrt(MaxNReal); // 1.0E+15
 
+const int MAX_SIMPLEX_ITERATIONS = 1512; // 128;
 
-// 8 * 32 = 256
-const int BLOCK_SIZE_E_1X = 32;  // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#thread-hierarchy the arrange of the warp in the block is giving for a two-dimensional block of size (Dx, Dy),the thread ID of a thread of index (x, y) is (x + y Dx)
-const int BLOCK_SIZE_E_1Y = 8;
-
-const int BLOCK_SIZE_E_2X = 1;
-const int BLOCK_SIZE_E_2Y = 1;
-
-const int BLOCK_SIZE_E_3X = 1;
-const int BLOCK_SIZE_E_3Y = 1;
-
-// 8 * 32 = 256
-const int BLOCK_SIZE_E_4X = 32; // 32
-const int BLOCK_SIZE_E_4Y = 8; // 4
-
-const int MAX_SIMPLEX_ITERATIONS = 512; // 128;
-
-const int TRAYECTORIAS = 1; // 1000;
-
-__device__ TSimplexGPUs desestructurarTabloideDev(TabloideGPUs &tabloide);
-__device__ void moverseASolFactible(TabloideGPUs &tabloide);
-__device__ void agregarRestriccionesCotaSup(TabloideGPUs &tabloide);
-__device__ void agregarVariablesHolguraArtificiales(TabloideGPUs &tabloide);
-__device__ void resolverVariablesArtificialesEnZ(TabloideGPUs &tabloide);
-
-__device__ void resolver_simplex_big_m(TabloideGPUs &tabloide);
-
-__device__ void locate_min_dj(TSimplexGPUs &smp, int &zpos) ;
-__device__ void locate_min_ratio(TSimplexGPUs &smp, int zpos, int &qpos);
-__device__ void intercambiarvars(TSimplexGPUs &smp, int kfil, int jcol);
-
-__device__ void printStatusDev(TSimplexGPUs &smp);
-__device__ void printResultDev(TSimplexGPUs &smp);
-__device__ double findVarXbValueDev(TSimplexGPUs &smp, int indx);
-__device__ int findVarIndexDev(TSimplexGPUs &smp, int indx);
-
-__global__ void kernel_resolver_etapa_moverse_a_sol_factible(TDAOfSimplexGPUs simplex_array) {
-	moverseASolFactible(simplex_array[blockIdx.x]);
-} 
-
-__global__ void kernel_resolver_etapa_agregar_restricciones_cota_sup(TDAOfSimplexGPUs simplex_array) {
-	agregarRestriccionesCotaSup(simplex_array[blockIdx.x]);
-} 
-
-__global__ void kernel_resolver_etapa_agregar_variables_holgura_artificiales(TDAOfSimplexGPUs simplex_array) {
-	agregarVariablesHolguraArtificiales(simplex_array[blockIdx.x]);
-}
-
-__global__ void kernel_resolver_etapa_resolver_variables_artificiales_en_z(TDAOfSimplexGPUs simplex_array) {
-	resolverVariablesArtificialesEnZ(simplex_array[blockIdx.x]);
-}
-
-__global__ void kernel_resolver_simplex_big_m(TDAOfSimplexGPUs simplex_array) {
-	resolver_simplex_big_m(simplex_array[blockIdx.x]);
-}
-
-__global__ void kernel_test(TDAOfSimplexGPUs d_simplex_array) {
-	printf("Hello World from GPU!\n");
-	printf("%.2f\n", d_simplex_array[0][2]);
-	printf("%.2f\n", d_simplex_array[0][16]);
-	printf("End test GPU!\n");
-}
-
-void printResult(TSimplexGPUs &smp);
-void printStatus(TSimplexGPUs &smp);
-int findVarIndex(TSimplexGPUs &smp, int indx);
-double findVarXbValue(TSimplexGPUs &smp, int indx);
+void resolver_cpu(TabloideGPUs &simplex) ;
 TSimplexGPUs desestructurarTabloide(TabloideGPUs &tabloide);
-
-void ini_mem(TDAOfSimplexGPUs simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
-void free_mem(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
-
+void moverseASolFactible(TSimplexGPUs &smp);
+void agregarRestriccionesCotaSup(TSimplexGPUs &smp);
+void agregarVariablesHolguraArtificiales(TSimplexGPUs &smp);
+void resolverVariablesArtificialesEnZ(TSimplexGPUs &smp);
+void resolver_simplex_big_m(TSimplexGPUs &simplex) ;
+bool intercambiarvars(TSimplexGPUs &smp, int kfil, int jcol);
+int locate_mejor_dj(TSimplexGPUs &smp);
+int locate_min_ratio(TSimplexGPUs &smp, int zpos);
 void resolver_ejemplo1();
+void resolver_ejemplo_pdf_cheto();
 void resolver_ejemplo2trasnform();
-void resolver_ejemplo_caso_libro();
-void resolver_ejemplo_caso_tipo_grande();
-void resolver_ejemplo_caso_tipo_extra_grande();
-void resolver_ejemplo_caso_tipo();
+void printStatus(TSimplexGPUs &smp);
+void printResult(TSimplexGPUs &smp);
+double findVarXbValue(TSimplexGPUs &smp, int indx);
+int findVarIndex(TSimplexGPUs &smp, int indx);
 
 TabloideGPUs getTabloideCasoTipo();
+void resolver_ejemplo_caso_tipo();
+
 TabloideGPUs getTabloideCasoTipoGrande();
+void resolver_ejemplo_caso_tipo_grande();
+
 TabloideGPUs getTabloideCasoTipoExtraGrande();
-
-
-void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
+void resolver_ejemplo_caso_tipo_extra_grande();
 
 int main() {
     
 	// resolver_ejemplo1();
 	
-	// resolver_ejemplo2trasnform();
+	// resolver_ejemplo_pdf_cheto();
 	
-	// resolver_ejemplo_caso_libro();
+	// resolver_ejemplo2trasnform();
 	
 	// resolver_ejemplo_caso_tipo();
 	
@@ -120,34 +66,35 @@ void resolver_ejemplo1() {
 	Problema Propuesto por SimSEE
 		Min x1 + 3x2 + 2x3
 		st:
-		x1 + x2 + x3 	≥ -10.5
-		x1 + x2 			= - 5.3
-		x1  		- x3 		≤ 2.9
-		0 ≤ x1 ≤ 12,  -6 ≤ x2 ≤ 6, -5 ≤ x3 ≤ 5
+		x1 + x2 + x3 	 >= -10.5
+		x1 + x2 		 = - 5.3
+		x1  		- x3 <= 2.9
+
+		0 = x1 = 12,  -6 = x2 = 6, -5 = x3 = 5
 		
 		Sol SIMSEE: x1 = 0, x2 = -5.3, x3 = -2.9 Verificado, z min = -21.7
 		
 => cambio variable para las cotas inferiores xc = x + cota inf => x = xc - cota inf => Sol xc: x1 = 0, x2 = 0.7, x3 = 2.1
 	Max -x1 - 3x2 - 2x3
 		st:
-		x1 + x2 + x3 	≥ -10.5 + 6 + 5 = 0.5
+		x1 + x2 + x3 		>= -10.5 + 6 + 5 = 0.5
 		x1 + x2 			= - 5.3 + 6 		 = 0.7
-		x1  		  - x3 	≤ 2.9 - 5 			 = -2.1
-		x1					≤ 12
-				x2			≤ 6 + 6 			 = 12
-						x3	≤ 5 + 5				 = 10
+		x1  		  - x3 	<= 2.9 - 5 			 = -2.1
+		x1					= 12
+				x2			= 6 + 6 			 = 12
+						x3	= 5 + 5				 = 10
 						
 		x1, x2, x3 > 0
 		
 =>	Move to a factible solution (Xb > 0)
 		Max -x1 - 3x2 - 2x3
 		st:
-		x1 + x2 + x3 	≥ 0.5
+		x1 + x2 + x3 		>= 0.5
 		x1 + x2 			= 0.7
-	   -x1  		 + x3 	≥ 2.1
-		x1					≤ 12
-				x2			≤ 12
-						x3	≤ 10
+	   -x1  		 + x3 	<= 2.1
+		x1					= 12
+				x2			= 12
+						x3	= 10
 						
 		x1, x2, x3 > 0
 	
@@ -161,48 +108,84 @@ void resolver_ejemplo1() {
 				x2			+ s4 		 = 12
 						x3	+ s5 		 = 10
 	
-	x1..s5 ≥ 0
+	x1..s5 = 0
 	
 	RESULTADO OUR SIMPLEX: x1 = 0.7, xc2 = 0 => x2 = 0 - 6 = -6, xc3 = 2.8 => x3 = 2.8 - 5 = -2.2 Verificado, da tambien z min = -21.7
 */	
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	cudaError_t err;
 	
     //simplex->tabloide = (double*)malloc((simplex->NVariables + 1)*(simplex->NRestricciones + 1)*sizeof(double));
 	double tabl[] = {
-		3, 3, 15, 0, -1, -3, -2, 0, -eMe, -eMe, 0, -eMe, 0, 0, 0, 
+		3, 3, 15, 0, -1, -3, -2, 0, -M, -M, 0, -M, 0, 0, 0, 
 		11, 6, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 
 		0, 0, 0, 0, 12, 12, 10, 0, 0, 0, 0, 0, 0, 0, 0, 
 		0, 0, 0, 0, 0, -6, -5, 0, 0, 0, 0, 0, 0, 0, 0, 
 		0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 2, 1, 1, 1, 
 		0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 
-		5, 0, -eMe, 0.5, 1, 1, 1, -1, 1, 0, 0, 0, 0, 0, 0, 
-		6, 2, -eMe, 0.7, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 
-		8, 0, -eMe, 2.1, -1, 0, 1, 0, 0, 0, -1, 1, 0, 0, 0, 
+		5, 0, -M, 0.5, 1, 1, 1, -1, 1, 0, 0, 0, 0, 0, 0, 
+		6, 2, -M, 0.7, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 
+		8, 0, -M, 2.1, -1, 0, 1, 0, 0, 0, -1, 1, 0, 0, 0, 
 		9, 1, 0, 12, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 
 		10, 1, 0, 12, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 
 		11, 1, 0, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 
 	};
 	
 	TabloideGPUs tabloide = (double*)&tabl;
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
+	resolver_simplex_big_m(simplex);
+}
+
+void resolver_ejemplo_pdf_cheto() {
+	/*
+	Problema Propuesto por pdf
+		Min 4x1 + x2
+		st:
+		3x1 + x2 	= 3
+		4x1 + 3x2 	>= 6
+		x1 + 2x3 	<= 3
+		
+		x1, x2 > 0
+		
+		0 = z -4x1 -x2
+		
+		Sol pdf:
+*/
+
+	double tabl[] = {
+		2, 3, 10, 0, -4, -1, 0, 0, 0, 0,
+		6, 3, 0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		
+		0, 2, 0, 3, 3, 1, 0, 0, 0, 0, 
+		0, 0, 0, 6, 4, 3, 0, 0, 0, 0, 
+		0, 1, 0, 3, 1, 2, 0, 0, 0, 0
+	};
 	
-	int NTrayectorias = 1;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(sizeof(TabloideGPUs));
-	simplex_array[0] = tabloide;
+	TabloideGPUs tabloide = (double*)&tabl;
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, 1);
+	moverseASolFactible(simplex);
 	
-	const dim3 DimGrid_e4(NTrayectorias, 1);
-	const dim3 DimBlock_e4(BLOCK_SIZE_E_4X, BLOCK_SIZE_E_4Y);
-	kernel_resolver_simplex_big_m<<< DimGrid_e4, DimBlock_e4, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
+	agregarRestriccionesCotaSup(simplex);
 	
-	// ...
+	agregarVariablesHolguraArtificiales(simplex);
+	printf("Inicial\n");
+	printStatus(simplex);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
+	resolverVariablesArtificialesEnZ(simplex);
+	
+	printf("After resolverVariablesArtificialesEnZ\n");
+	printStatus(simplex);
+	//return;
+	
+	resolver_simplex_big_m(simplex);
+	
+	printf("Final");
+	printStatus(simplex);
+	printResult(simplex);
+	
 }
 
 void resolver_ejemplo2trasnform() {
@@ -211,31 +194,32 @@ void resolver_ejemplo2trasnform() {
 	Problema Propuesto por SimSEE
 		Min x1 + 3x2 + 2x3
 		st:
-		x1 + x2 + x3 	≥ -10.5
+		x1 + x2 + x3 		>= -10.5
 		x1 + x2 			= - 5.3
-		x1  		- x3 		≤ 2.9
-		0 ≤ x1 ≤ 12,  -6 ≤ x2 ≤ 6, -5 ≤ x3 ≤ 5
+		x1  		- x3 	<= 2.9
+
+		0 = x1 = 12,  -6 = x2 = 6, -5 = x3 = 5
 		
 		Sol SIMSEE: x1 = 0, x2 = -5.3, x3 = -2.9 Verificado, z min = -21.7
 		
 => cambio variable para las cotas inferiores xc = x + cota inf => x = xc - cota inf => Sol xc: x1 = 0, x2 = 0.7, x3 = 2.1
 	Max -x1 - 3x2 - 2x3
 		st:
-		x1 + x2 + x3 	≥ -10.5 + 6 + 5 		 = 0.5
+		x1 + x2 + x3 		= -10.5 + 6 + 5      = 0.5
 		x1 + x2 			= - 5.3 + 6 		 = 0.7
-		x1  		  - x3 	≤ 2.9 - 5 			 = -2.1
-		x1					≤ 12				 = 12
-				x2			≤ 6 + 6 			 = 12
-						x3	≤ 5 + 5				 = 10
+		x1  		  - x3 	= 2.9 - 5 			 = -2.1
+		x1					= 12				 = 12
+				x2			= 6 + 6 			 = 12
+						x3	= 5 + 5				 = 10
 						
 		x1, x2, x3 > 0
-*/	
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	cudaError_t err;
 	
+	0 = z + x1 + 3x2 + 2x2
+*/	
+	
+    //simplex->tabloide = (double*)malloc((simplex->NVariables + 1)*(simplex->NRestricciones + 1)*sizeof(double));
 	double tabl[] = {
-		3, 3, 15, 0, -1, -3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 
+		3, 3, 15, 0, -1, -3, -2, 0, 0, 0, 0, 0, 0, 0, 0,  // 3, 3, 15, 0, -1, -3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 
 		11, 6, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 
 		0, 0, 0, 0, 12, 12, 10, 0, 0, 0, 0, 0, 0, 0, 0, 
 		0, 0, 0, 0, 0, -6, -5, 0, 0, 0, 0, 0, 0, 0, 0, 
@@ -250,319 +234,139 @@ void resolver_ejemplo2trasnform() {
 	};
 	
 	TabloideGPUs tabloide = (double*)&tabl;
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
 	/*
 	=>	Move to a factible solution (Xb > 0)
 		Max -x1 - 3x2 - 2x3
 		st:
-		x1 + x2 + x3 	≥ 0.5
+		x1 + x2 + x3 		>= 0.5
 		x1 + x2 			= 0.7
-	   -x1  		 + x3 	≥ 2.1
-		x1					≤ 12
-				x2			≤ 12
-						x3	≤ 10
+	   -x1  		 + x3 	<= 2.1
+		x1					= 12
+				x2			= 12
+						x3	= 10
 						
 		x1, x2, x3 > 0
 	
 => Agregamos las variables de holgura y demasia 
 		Max -x1 - 3x2 - 2x3
 		st:
-		x1 + x2 + x3 - s1 + a1  = 0.5
-		x1 + x2 	 + a2       = 0.7
-	  - x1  	+ x3 - s2 + a3 	= 2.1
-		x1			 + s3 		= 12
-			x2		 + s4 		= 12
-				  x3 + s5 		= 10
+		x1 + x2 + x3 	 - s1 + a1  	= 0.5
+		x1 + x2 			+ a2    	= 0.7
+	  - x1 		 + x3 	 - s2 + a3 		= 2.1
+		x1					+ s3 		= 12
+				x2			+ s4 		= 12
+						x3	+ s5 		= 10
 	
-	x1..s5 ≥ 0
+	x1..s5 = 0
 	
 	RESULTADO OUR SIMPLEX: x1 = 0.7, xc2 = 0 => x2 = 0 - 6 = -6, xc3 = 2.8 => x3 = 2.8 - 5 = -2.2 Verificado, da tambien z min = -21.7
 	*/
 	
-	int NTrayectorias = 1;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
-	simplex_array[0] = tabloide;
+	moverseASolFactible(simplex);
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	agregarRestriccionesCotaSup(simplex);
 	
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-
-	int largo, alto;
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		largo = (int) simplex_array[kTrayectoria][2];
-		alto = (int) simplex_array[kTrayectoria][largo + 1] + 6;
-		cudaMemcpy(simplex_array[kTrayectoria], h_simplex_array[kTrayectoria], largo*alto*sizeof(double), cudaMemcpyDeviceToHost);
-		err = cudaGetLastError(); 
-		if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
-	}
+	agregarVariablesHolguraArtificiales(simplex);
+	printf("Inicial\n");
+	printStatus(simplex);
 	
-	TSimplexGPUs smp = desestructurarTabloide(simplex_array[0]);
+	resolverVariablesArtificialesEnZ(simplex);
 	
-	printStatus(smp);
-	printResult(smp);
+	printf("After resolverVariablesArtificialesEnZ\n");
+	printStatus(simplex);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
-	free(h_simplex_array);
-	free(tabloide);
-
-}
-
-void resolver_ejemplo_caso_libro() {
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	TSimplexGPUs smp;
+	resolver_simplex_big_m(simplex);
 	
-	double tabl[] = {
-		2, 3, 10, 0, -1, -3, -2, 0, 0, 0, 
-		11, 6, 0, 0, 1, 1, 0, 0, 0, 0, 0, 
-		0, 0, 0, 0, 12, 12, 10, 0, 0, 0, 
-		0, 0, 0, 0, 0, -6, -5, 0, 0, 0, 
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0.5, 1, 1, 1, 0, 0, 0,
-		0, 2, 0, 0.7, 1, 1, 0, 0, 0, 0,
-		0, 0, 0, 2.1, -1, 0, 1, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	};
-	
-	TabloideGPUs tabloide = (double*)&tabl;
-	
-	int NTrayectorias = TRAYECTORIAS;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
-	for (unsigned int t = 0; t < NTrayectorias; t++) {
-		simplex_array[t] = tabloide;
-	}
-	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
-	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
-	
-	printStatus(smp);
-	printResult(smp);
-	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
-	free(h_simplex_array);
-	free(tabloide);
+	printf("Final");
+	printStatus(simplex);
+	printResult(simplex);
 
 }
 
 void resolver_ejemplo_caso_tipo() {
-		
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	TSimplexGPUs smp;
 	
 	TabloideGPUs tabloide = getTabloideCasoTipo();
 	
-	int NTrayectorias = TRAYECTORIAS;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
-	for (unsigned int t = 0; t < NTrayectorias; t++) {
-		simplex_array[t] = tabloide;
-	}
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	printStatus(simplex);
 	
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	moverseASolFactible(simplex);
 	
-	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
+	agregarRestriccionesCotaSup(simplex);
 	
-	printStatus(smp);
-	printResult(smp);
+	agregarVariablesHolguraArtificiales(simplex);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
-	free(h_simplex_array);
-	free(tabloide);
+	resolverVariablesArtificialesEnZ(simplex);
+	
+	// printStatus(simplex);
+	// return;
+	
+	resolver_simplex_big_m(simplex);
+	
+	printStatus(simplex);
+	printResult(simplex);
 
 }
 
 void resolver_ejemplo_caso_tipo_grande() {
-		
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	TSimplexGPUs smp;
-	
 	TabloideGPUs tabloide = getTabloideCasoTipoGrande();
 	
-	smp = desestructurarTabloide(tabloide);
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
-	int NTrayectorias = TRAYECTORIAS;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
-	for (unsigned int t = 0; t < NTrayectorias; t++) {
-		simplex_array[t] = tabloide;
-	}
+	moverseASolFactible(simplex);
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	agregarRestriccionesCotaSup(simplex);
 	
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	agregarVariablesHolguraArtificiales(simplex);
 	
-	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
+	resolverVariablesArtificialesEnZ(simplex);
 	
-	printStatus(smp);
-	printResult(smp);
+	printStatus(simplex);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
-	free(h_simplex_array);
-	free(tabloide);
+	resolver_simplex_big_m(simplex);
+
+	printStatus(simplex);
+	printResult(simplex);
 }
 
 void resolver_ejemplo_caso_tipo_extra_grande() {
-		
-	TDAOfSimplexGPUs d_simplex_array; 
-	TDAOfSimplexGPUs h_simplex_array;
-	TSimplexGPUs smp;
-	
 	TabloideGPUs tabloide = getTabloideCasoTipoExtraGrande();
 	
-	smp = desestructurarTabloide(tabloide);
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
-	int NTrayectorias = TRAYECTORIAS;
-	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
-	for (unsigned int t = 0; t < NTrayectorias; t++) {
-		simplex_array[t] = tabloide;
-	}
+	moverseASolFactible(simplex);
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	agregarRestriccionesCotaSup(simplex);
 	
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	agregarVariablesHolguraArtificiales(simplex);
 	
-	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
+	resolverVariablesArtificialesEnZ(simplex);
 	
-	printStatus(smp);
-	printResult(smp);
+	printStatus(simplex);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
-	free(h_simplex_array);
-	free(tabloide);
+	resolver_simplex_big_m(simplex);
+
+	printStatus(simplex);
+	printResult(simplex);
 }
 
-void ini_mem(TDAOfSimplexGPUs simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias) {
+void resolver_cpu(TabloideGPUs &tabloide) {
+	TSimplexGPUs simplex = desestructurarTabloide(tabloide);
 	
-	int largo, alto;
+	printStatus(simplex);
 	
-	h_simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
+	moverseASolFactible(simplex);
+	agregarRestriccionesCotaSup(simplex);
+	agregarVariablesHolguraArtificiales(simplex);
 	
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		largo = (int) simplex_array[kTrayectoria][2];
-		alto = (int) simplex_array[kTrayectoria][largo + 1] + 6;
-		
-		cudaMalloc(&h_simplex_array[kTrayectoria], largo*alto*sizeof(double));
-		cudaMemcpy(h_simplex_array[kTrayectoria], simplex_array[kTrayectoria], largo*alto*sizeof(double), cudaMemcpyHostToDevice);
-	}
+	resolver_simplex_big_m(simplex);
 	
-	cudaMalloc(&d_simplex_array, NTrayectorias*sizeof(TabloideGPUs));
-	cudaMemcpy(d_simplex_array, h_simplex_array, NTrayectorias*sizeof(TabloideGPUs), cudaMemcpyHostToDevice);
+	printStatus(simplex);
+	printResult(simplex);
 	
-	cudaError_t err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA ini_mem inside error", cudaGetErrorString(err));
-	
-}
-
-void free_mem(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias) {
-	
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		cudaFree(h_simplex_array[kTrayectoria]);
-	}
-	
-	cudaFree(d_simplex_array);
-	
-	cudaError_t err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 free_mem inside error", cudaGetErrorString(err));
-}
-
-
-void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias) {
-	
-	int largo, alto;
-	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
-	cudaError_t err;
-	
-	// Ejecuto los kernels
-	const dim3 DimGrid_e1(NTrayectorias, 1);
-	const dim3 DimBlock_e1(BLOCK_SIZE_E_1X, BLOCK_SIZE_E_1Y);
-	kernel_resolver_etapa_moverse_a_sol_factible<<< DimGrid_e1, DimBlock_e1, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 1 error", cudaGetErrorString(err));
-	
-	const dim3 DimGrid_e2(NTrayectorias, 1);
-	const dim3 DimBlock_e2(BLOCK_SIZE_E_2X, BLOCK_SIZE_E_2Y);
-	kernel_resolver_etapa_agregar_restricciones_cota_sup<<< DimGrid_e2, DimBlock_e2, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 error", cudaGetErrorString(err));
-	
-	const dim3 DimGrid_e3(NTrayectorias, 1);
-	const dim3 DimBlock_e3(BLOCK_SIZE_E_3X, BLOCK_SIZE_E_3Y);
-	kernel_resolver_etapa_agregar_variables_holgura_artificiales<<< DimGrid_e3, DimBlock_e3, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 3 error", cudaGetErrorString(err));
-	
-	const dim3 DimGrid_e4(NTrayectorias, 1);
-	const dim3 DimBlock_e4(BLOCK_SIZE_E_4X, BLOCK_SIZE_E_4Y);
-	kernel_resolver_etapa_resolver_variables_artificiales_en_z<<< DimGrid_e4, DimBlock_e4, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
-	
-	const dim3 DimGrid_e5(NTrayectorias, 1);
-	const dim3 DimBlock_e5(BLOCK_SIZE_E_4X, BLOCK_SIZE_E_4Y);
-	kernel_resolver_simplex_big_m<<< DimGrid_e5, DimBlock_e5, 0, 0 >>>(d_simplex_array);
-	cudaDeviceSynchronize();
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
-	
-	cudaMemcpy(h_simplex_array, d_simplex_array, NTrayectorias*sizeof(TabloideGPUs), cudaMemcpyDeviceToHost);
-
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		largo = (int) simplex_array[kTrayectoria][2];
-		alto = (int) simplex_array[kTrayectoria][largo + 1] + 6;
-		cudaMemcpy(simplex_array[kTrayectoria], h_simplex_array[kTrayectoria], largo*alto*sizeof(double), cudaMemcpyDeviceToHost);
-	}
-	err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA cudaMemcpy cudaMemcpyDeviceToHost error", cudaGetErrorString(err));
-
-}
-
-/**************************************************************************************************************************************************************************************************/
-
-__device__ TSimplexGPUs desestructurarTabloideDev(TabloideGPUs &tabloide) {
-	TSimplexGPUs smp;
-	
-	smp.tabloide = tabloide;
-	
-	smp.var_x = (int) tabloide[0];
-	smp.rest_ini = (int) tabloide[1];
-	smp.mat_adv_row = (int) tabloide[2];
-	smp.var_all = (int) tabloide[smp.mat_adv_row];
-	smp.rest_fin = (int) tabloide[smp.mat_adv_row + 1];
-	
-	smp.z = &tabloide[4]; // funcion z, cantidad de variables, horizontal
-    smp.flg_x = &tabloide[smp.mat_adv_row + 4]; // cantidad de variables x = smp.var_x
-	
-	smp.sup = &tabloide[2*smp.mat_adv_row + 4]; // cantidad de variables x = smp.var_x, horizontal
-	smp.inf = &tabloide[3*smp.mat_adv_row + 4]; // cantidad de variables x = smp.var_x, horizontal
-	
-	smp.var_type = &tabloide[4*smp.mat_adv_row + 4]; // largo filas, horizontal
-	
-	smp.top = &tabloide[5*smp.mat_adv_row + 4]; // largo filas, horizontal
-    smp.left = &tabloide[6*smp.mat_adv_row]; // largo restricciones finales, vertical
-	
-	smp.flg_y = &tabloide[6*smp.mat_adv_row + 1]; // 0 restriccion >=, 1 <=, 2 =, vertical
-	
-	smp.Cb = &tabloide[6*smp.mat_adv_row + 2]; // cantidad de restricciones, vertical
-	smp.Xb = &tabloide[6*smp.mat_adv_row + 3]; // cantidad de restricciones, vertical
-	
-    smp.matriz = &tabloide[6*smp.mat_adv_row + 4];
-	smp.mat_ext = smp.Xb; // El vector Xb esta contiguo a la matriz por lo tanto su direccion es igual a la matriz extendida Xb|A
-	
-	return smp;
 }
 
 TSimplexGPUs desestructurarTabloide(TabloideGPUs &tabloide) {
@@ -577,6 +381,8 @@ TSimplexGPUs desestructurarTabloide(TabloideGPUs &tabloide) {
 	smp.rest_fin = (int) tabloide[smp.mat_adv_row + 1];
 	
 	smp.z = &tabloide[4]; // funcion z, cantidad de variables, horizontal
+	smp.zZ = &tabloide[3]; // funcion z con resultado, cantidad de variables + 1, horizontal
+	
     smp.flg_x = &tabloide[smp.mat_adv_row + 4]; // cantidad de variables x = smp.var_x
 	
 	smp.sup = &tabloide[2*smp.mat_adv_row + 4]; // cantidad de variables x = smp.var_x, horizontal
@@ -598,57 +404,40 @@ TSimplexGPUs desestructurarTabloide(TabloideGPUs &tabloide) {
 	return smp;
 }
 
-__device__ void moverseASolFactible(TabloideGPUs &tabloide) {
-	
-	TSimplexGPUs smp = desestructurarTabloideDev(tabloide);
-	
-	/*
-		Oprimizacion a desestructurarTabloideDev
-		TSimplexGPUs smp;
-		smp.var_x = (int) tabloide[0];
-		smp.rest_ini = (int) tabloide[1];
-		smp.mat_adv_row = (int) tabloide[2];
-		smp.Xb = &tabloide[6*smp.mat_adv_row + 3];
-		smp.flg_y = &tabloide[6*smp.mat_adv_row + 1];
-		smp.matriz = &tabloide[6*smp.mat_adv_row + 4];
-	*/
-	
-	for (int i = threadIdx.y; i < smp.rest_ini; i += blockDim.y) {	
+void moverseASolFactible(TSimplexGPUs &smp) {
+	for (int i = 0; i < smp.rest_ini; i++) {
 		if (smp.Xb[i*smp.mat_adv_row] < 0) {
-			if (threadIdx.x == 0) {	
-				smp.flg_y[i*smp.mat_adv_row] = (smp.flg_y[i*smp.mat_adv_row] == 0) ? 1 : 2; // Move >= to <=
+			smp.Xb[i*smp.mat_adv_row] *= -1;
+			for (int j = 0; j < smp.var_x; j++) {
+				smp.matriz[i*smp.mat_adv_row + j] *= -1;
 			}
-			for (int j = threadIdx.x; j < (smp.var_x + 1); j += blockDim.x) {
-				smp.mat_ext[i*smp.mat_adv_row + j] *= -1;
-			}
+			smp.flg_y[i*smp.mat_adv_row] = (smp.flg_y[i*smp.mat_adv_row] == 0) ? 1 : 2; // Move >= to <=
 		}
 	}
-
 }
 
-// No es paralelizable a nivel de bloque. La variable qrest es actualizado en cada bucle, y las celdas a las que se acceden dependen de ese valor, por las actualizaciones a la matriz se deben ejecutar en orden.
-__device__ void agregarRestriccionesCotaSup(TabloideGPUs &tabloide) {
-	
-	TSimplexGPUs smp = desestructurarTabloideDev(tabloide);
-	
+void agregarRestriccionesCotaSup(TSimplexGPUs &smp) {
 	int qrest = smp.rest_ini;
 	for (int i = 0; i < smp.var_x; i++) {
+		//printf("agRCSup i %i\t", i);
 		if (smp.flg_x[i] > 0) {
+			//printf("M %i\n", (smp.rest_ini + i)*smp.mat_adv_row);
 			smp.flg_y[(smp.rest_ini + i)*smp.mat_adv_row] = 1;
-			smp.Xb[(smp.rest_ini + i)*smp.mat_adv_row] = smp.sup[i]; 
-			smp.matriz[qrest*smp.mat_adv_row + i] = 1; 
+			//printf("N ");
+			smp.Xb[(smp.rest_ini + i)*smp.mat_adv_row] = smp.sup[i];
+			//printf("O ");
+			for (int j = 0; j < smp.var_x; j++) {
+				smp.matriz[qrest*smp.mat_adv_row + j] = (qrest == (j + smp.rest_ini))? 1 : 0;
+				//printf("agRCSup j %i, qrest %i\t", j, qrest);
+			}
 			qrest ++;
 		}
 	}
+	// printf("Rest count %i / %i \n", smp.rest_fin, qrest);
 	if (smp.rest_fin != qrest) printf("DISCREPANCIA EN LA CANTIDAD DE RESTRICCIONES FINAL\n");
-	
 }
 
-// No es paralelizable a nivel de bloque. La variable var_count es actualizado en cada bucle, y las celdas a las que se acceden dependen de ese valor, por las actualizaciones a la matriz se deben ejecutar en orden.
-__device__ void agregarVariablesHolguraArtificiales(TabloideGPUs &tabloide) {
-	
-	TSimplexGPUs smp = desestructurarTabloideDev(tabloide);
-	
+void agregarVariablesHolguraArtificiales(TSimplexGPUs &smp) {
 	int var_s, var_a, var_count;
 	var_s = 0; var_a = 0; var_count = smp.var_x;
 	
@@ -657,14 +446,12 @@ __device__ void agregarVariablesHolguraArtificiales(TabloideGPUs &tabloide) {
 		smp.top[i] = i + 1;
 	}
 	
-	/* Esto ya deberia venir completo desde la CPU, usar calloc()
 	// Completo con 0s la matriz
 	for (int i = 0; i < smp.rest_fin; i++) {
 		for (int j = var_count; j < smp.var_all; j++) {
 			smp.matriz[i*smp.mat_adv_row + j] = 0;
 		}
 	}
-	*/
 	
 	for (int i = 0; i < smp.rest_fin; i++) {
 		if (smp.flg_y[i*smp.mat_adv_row] == 0) { // rest >=
@@ -713,268 +500,142 @@ __device__ void agregarVariablesHolguraArtificiales(TabloideGPUs &tabloide) {
 		}
 	}
 	
+	// printf("Var count %i / %i \n", smp.var_all, var_count);
 	if (smp.var_all != var_count) printf("DISCREPANCIA EN LA CANTIDAD DE VARIABLES FINAL\n");
 	
-	__syncthreads();
-	
 }
 
-__device__ void resolverVariablesArtificialesEnZ(TabloideGPUs &tabloide) {
+void resolverVariablesArtificialesEnZ(TSimplexGPUs &smp) {
 	
-	__shared__  double apz_acc[MAX_VARS];
-	__shared__  double apz_acc_mat[BLOCK_SIZE_E_4Y][BLOCK_SIZE_E_4X];
+	// double * zZ = &smp.tabloide[3]; // z x1 x2.... (en este punto z = 0)
 	
-	int thd_indx = threadIdx.y*blockDim.x + threadIdx.x;
-	int thds_in_block = blockDim.y*blockDim.x;
-	double apz_accum;
+	// printf("resolverVariablesArtificialesEnZ \n");
 	
-	TSimplexGPUs smp = desestructurarTabloideDev(tabloide);
-	double * zZ = &tabloide[3]; // z x1 x2.... (en este punto z = 0)
-	
-	// inicializo con Zj
-	for (unsigned int x = thd_indx; x <= smp.var_all; x += thds_in_block){
-		apz_acc[x] = zZ[x];
-	}
-	
-	__syncthreads();
-	
-	unsigned int x = threadIdx.x;
-	cargar_tile:
-	
-	if (x < smp.var_all) {
-		apz_accum = 0;
-		for (unsigned int y = threadIdx.y; y < smp.rest_fin; y += blockDim.y) {
-			apz_accum += smp.Cb[y*smp.mat_adv_row] * smp.mat_ext[y*smp.mat_adv_row + x];
+	for (unsigned int y = 0; y < smp.rest_fin; y++) {
+		if (smp.Cb[y*smp.mat_adv_row] != 0) {
+			for (unsigned int x = 0; x <= smp.var_all; x++) {
+				smp.zZ[x] += M * smp.mat_ext[y*smp.mat_adv_row + x];
+			}
 		}
-		apz_acc_mat[threadIdx.y][threadIdx.x] = apz_accum;
-	}
-	
-	__syncthreads();
-	
-	// Reduccion Interleaved Addressing en el bloque en shared memory
-	for (unsigned int s = 1; s < blockDim.y; s *= 2) {
-		int index = 2 * s * threadIdx.y;
-		if ((index + s) < blockDim.y && x < smp.var_all) {
-			apz_acc_mat[index][threadIdx.x] += apz_acc_mat[index + s][threadIdx.x];
-		}
-		__syncthreads();
-	}
-	if (threadIdx.y == 0) apz_acc[x] += apz_acc_mat[0][threadIdx.x]; // Accumulo el resultado parcial en el vector final
-	
-	__syncthreads(); 
-	
-	x += blockDim.x;
-	if ((x - threadIdx.x) <= smp.var_all) {
-		goto cargar_tile;
-	}
-	
-	// Escribo el vector zZ (shared memory) en la memoria global
-	for (unsigned int x = thd_indx; x <= smp.var_all; x += thds_in_block){
-		zZ[x] = apz_acc[x];
 	}
 
 }
 
-__device__ void resolver_simplex_big_m(TabloideGPUs &tabloide) {
+void resolver_simplex_big_m(TSimplexGPUs &simplex) {
+	int zpos, qpos, it;
 	
-	TSimplexGPUs simplex = desestructurarTabloideDev(tabloide);
+	// printf("resolver_simplex_big_m_final INT \n");
 	
-	int it;
-	__shared__ int zpos, qpos;
-	
+	// printStatus(simplex);
 	it = 0;
 	
 	do {
+		zpos = locate_mejor_dj(simplex);
+		// printf("%s %d \n", "zpos", zpos);
 		
-		locate_min_dj(simplex, zpos);
-
 		if (zpos < 0) {
-			// Condicion de MAXIMO encontrado
-			// En la celda 2,0 de deja 0 indicando que el maximo ha sido encontrado
-			if (threadIdx.x == 0 && threadIdx.y == 0) simplex.tabloide[2*simplex.mat_adv_row + 1] = it; // En la celda (2,1) se ecribe la iteracion en que se encuentra la solucion
+			printf("%s %i\n", "Condicion de parada maximo encontrado en iteracion", it);
+			// printResult(simplex);
 			return;
 		}
 		
-		locate_min_ratio(simplex, zpos, qpos);
-		
+		qpos = locate_min_ratio(simplex, zpos);
+		// printf("%s %d \n", "qpos", qpos);
 		if (qpos < 0) {
-			// Salvar resultado en celda (2,0), resultado = 1 = POSICION DE COCIENTE NO ENCONTRADA en iteracion it
-			if (threadIdx.x == 0 && threadIdx.y == 0) {
-				simplex.tabloide[2*simplex.mat_adv_row] = 1;
-				simplex.tabloide[2*simplex.mat_adv_row + 1] = it; // En la celda (2,1) se ecribe la iteracion en que resulta que la solucion no es posible
-			}
+			printf("%s %i\n", "Posicion de cociente no encontrada en iteracion", it);
 			return;
 		}
 		
 		intercambiarvars(simplex, qpos, zpos);
 		
+		// printf("\nzpos = %i qpos = %i\n", zpos, qpos); 
+		
+		// printf("Zj %d, qi %d \n", zpos, qpos);
+		// printStatus(simplex);
+		
 		it++;
 		
 		if (it == MAX_SIMPLEX_ITERATIONS) {
-			// Salvar resultado en la celda (2,0), resultado = 2 = ITERACIONES MAXIMAS ALCANZADAS en it = MAX_SIMPLEX_ITERATIONS
-			if (threadIdx.x == 0 && threadIdx.y == 0) simplex.tabloide[2*simplex.mat_adv_row] = 2;
+			printf("Max %i iterations achieved\n", it);
 			return;
 		}
 	} while (true);
 	
 }
 
-// Cambiar el orden de recorrida y guardar el acumulador en la shared memory, luego usar reduccion para obtener el min
-__device__ void locate_min_dj(TSimplexGPUs &smp, int &zpos) {
-	__shared__  double apz_acc[MAX_VARS];
-	__shared__  int apz_indx[MAX_VARS];
+int locate_mejor_dj(TSimplexGPUs &smp) {
+	int mejorz, z, top;
+	double max_apz, apz;
 	
-	int top;
-	int thd_indx = threadIdx.y*blockDim.x + threadIdx.x;
-	int thds_in_block = blockDim.y*blockDim.x; 
-	
-	// inicializo Zj en shared memory
-	for (unsigned int x = thd_indx; x < smp.var_all; x += thds_in_block){
-		apz_indx[x] = x;
-		top = smp.top[x] - 1;
-		apz_acc[x] = smp.z[x];
-		if (smp.var_type[top] == 2) { // it is not an artificial variable
-			apz_indx[x] = -1; // Asi lo excluyo en la reduccion(apz_indx[z] < 0...)
-		}
-	}
-	__syncthreads();
-	
-	// Condicion los hilos en el bloque deben ser mayor o igual que var_all/2, sino hay que agregar un bucle mas para que se procesen el resto del los valores en la reduccion
-	if (thd_indx == 0 && smp.var_all > 2*thds_in_block) printf("Condicion los hilos en el bloque deben ser mayor o igual que var_all/2 \n");
-	
-	// Reduccion
-	// Reduccion Interleaved Addressing
-	for (unsigned int s = 1; s < smp.var_all; s *= 2) {
-		int index = 2 * s * thd_indx;
-		if ((index + s) < smp.var_all) {
-			if (apz_indx[index + s] >= 0 && apz_acc[index + s] > 0 && 
-				(apz_indx[index] < 0 || apz_acc[index + s] > apz_acc[index])
-			) {			
-				apz_indx[index] = apz_indx[index + s];
-				apz_acc[index] = apz_acc[index + s];
+	mejorz = -1;
+	max_apz = 0;
+	for (z = 0; z < smp.var_all; z++) {
+		top = smp.top[z] - 1;
+		if (smp.var_type[top] != 2) { // If it is not an artificial variable
+			apz = smp.z[z]; // zj
+			if (apz > 0 && apz > max_apz) {
+				mejorz = z;
+				max_apz = apz;
 			}
 		}
-		__syncthreads();
 	}
 	
-	// Escribir resultado
-	if (thd_indx == 0) {
-		if (apz_indx[0] >= 0 && apz_acc[0] > 0) {
-			zpos = apz_indx[0];
-			// printf("zpos = (%i, %.12f)\n", apz_indx[0], apz_acc[0]); 
-		} else {
-			zpos = -1;
-			// printf("zpos = -1");
-		}
-	}
-	
-	__syncthreads();
-	
+	return mejorz;
 }
 
 
-__device__ void locate_min_ratio(TSimplexGPUs &smp, int zpos, int &qpos) {	
-	__shared__  double apy_acc[MAX_RES];
-	__shared__  int apy_indx[MAX_RES];
-	
-	int thd_indx = threadIdx.y*blockDim.x + threadIdx.x;
-	
-	double denom;
-	
-	// Condicion los hilos en el bloque deben ser mayor o igual que rest_fin sino hay que agregar un bucle mas para que se proesen el resto del los valores en la reduccion
-	if (thd_indx == 0 && smp.rest_fin > (blockDim.x * blockDim.y)) printf("Condicion los hilos en el bloque deben ser mayor o igual que rest_fin \n");
-	
-	// Cargo los valores en memoria compartida
-	if (thd_indx < smp.rest_fin)  {
-		denom = smp.matriz[thd_indx*smp.mat_adv_row + zpos];
+int locate_min_ratio(TSimplexGPUs &smp, int zpos) {
+	int mejory, y;
+	double min_apy, qy, denom;
+
+	mejory = -1;
+	min_apy = MaxNReal;
+	for (y = 0; y < smp.rest_fin; y++) {
+		denom = smp.matriz[y*smp.mat_adv_row + zpos];
 		if (denom > CasiCero_Simplex) {
-			apy_indx[thd_indx] = thd_indx;
-			apy_acc[thd_indx] = smp.Xb[thd_indx*smp.mat_adv_row] / denom;
-		} else {	
-			apy_indx[thd_indx] = -1; // Asi lo excluyo en la reduccion(apy_indx[z] < 0...)
-		}
-	}
-	
-	__syncthreads();
-	
-	
-	// Reduccion
-	// Interleaved Addressing
-	int index;
-	for (unsigned int s = 1; s < smp.rest_fin; s *= 2) {
-		index = 2 * s * thd_indx;
-		if ((index + s) < smp.rest_fin) {			
-			if (apy_indx[index + s] >= 0 &&  apy_acc[index + s]  > CasiCero_Simplex &&
-				(apy_indx[index] < 0 || apy_acc[index + s] < apy_acc[index])
-			) {			
-				apy_indx[index] = apy_indx[index + s];
-				apy_acc[index] = apy_acc[index + s];
+			qy = smp.Xb[y*smp.mat_adv_row] / denom;
+			if (qy > CasiCero_Simplex && qy < min_apy) {
+				mejory = y;
+				min_apy = qy;
 			}
 		}
-		__syncthreads();
 	}
-	
-	// Escribir resultado
-	if (thd_indx == 0) {
-		if (apy_indx[0] >= 0 && apy_acc[0]  > CasiCero_Simplex) {
-			qpos = apy_indx[0];
-			// printf("qpos = (%i, %.12f)\n", apy_indx[0], apy_acc[0]);
-		} else {
-			qpos = -1;
-			// printf("qpos = -1\n");
-		}
-	}
-	
-	__syncthreads();
-
+	return mejory;
 }
 
-__device__ void intercambiarvars(TSimplexGPUs &smp, int kfil, int jcol) {
+bool intercambiarvars(TSimplexGPUs &smp, int kfil, int jcol) {
 
-	double m, invPiv;
+	double m, invPiv; //, ck;
 	int i, j, ipos, k;
+	double * zZ = &smp.tabloide[3]; // z x1 x2....
 	
 	invPiv = 1 / smp.matriz[kfil * smp.mat_adv_row + jcol];
 	
-	int thd_indx = threadIdx.y*blockDim.x + threadIdx.x;
-	int thds_in_block = blockDim.y*blockDim.x;
-	int block_dim = blockDim.x * blockDim.y;
-	
-	double * zZ = &smp.tabloide[3]; // z x1 x2....
-	
 	ipos = kfil * smp.mat_adv_row;
-	
-	__syncthreads(); // because of invPiv =...
-
-	for (j = thd_indx; j <= smp.var_all; j+= block_dim) { // Modifico la fila k (Xb inc)
-		smp.mat_ext[ipos + j] *= invPiv;
+	smp.Xb[kfil*smp.mat_adv_row] *= invPiv; // Modifico Xb
+	for (j = 0; j < smp.var_all; j++) { // Modifico la k fila
+		smp.matriz[ipos + j] *= invPiv;
 	}
+	smp.matriz[kfil * smp.mat_adv_row + jcol] = 1;
 	
-	__syncthreads();
-	
-	for (i = threadIdx.y; i < smp.rest_fin; i += blockDim.y) {
+	for (i = 0; i < smp.rest_fin; i++) {
 		if (i != kfil) {
-			m = smp.matriz[i*smp.mat_adv_row + jcol];			
+			m = smp.matriz[i *smp.mat_adv_row + jcol];
 			
-			for (j = threadIdx.x; j <= smp.var_all; j += blockDim.x) { // Modifico la Matriz
-				if ((j - 1) != jcol) {
-					// Aca esta actualizacion se hace coalesced y como es la mas importante podemos decir que el acceso es coalesced mayoritariamente
-					smp.mat_ext[i*smp.mat_adv_row + j] -= m * smp.mat_ext[ipos + j];
+			smp.Xb[i*smp.mat_adv_row] -= m*smp.Xb[kfil*smp.mat_adv_row]; // Modifico Xb
+			for (j = 0; j < smp.var_all; j++) { // Modifico la Matriz
+				if (j != jcol) {
+					smp.matriz[i *smp.mat_adv_row + j] -= m * smp.matriz[kfil*smp.mat_adv_row + j]; 
+				} else {
+					smp.matriz[i*smp.mat_adv_row + j] = 0;
 				}
 			}
 		}
 	}
 	
-	m = smp.z[jcol]; // Hago esta asignacion aca para sincronizar con la actualizacion de zZ que contiene a z
-	
-	__syncthreads();
-	
-	for (i = thd_indx; i < smp.rest_fin; i+= block_dim) { // Modifico la columna j
-		smp.matriz[i*smp.mat_adv_row + jcol] = 0;
-	}
-	
 	// Actualizo la funcion z
-	for (unsigned int x = thd_indx; x <= smp.var_all; x += thds_in_block){
+	m = smp.z[jcol];
+	for (unsigned int x = 0; x <= smp.var_all; x ++){
 		if ((x - 1) != jcol) {
 			zZ[x] -= smp.mat_ext[kfil*smp.mat_adv_row + x]*m;
 		} else {
@@ -982,38 +643,25 @@ __device__ void intercambiarvars(TSimplexGPUs &smp, int kfil, int jcol) {
 		}
 	}
 	
-	__syncthreads();
+	k = smp.top[jcol];
+	smp.top[jcol] = smp.left[kfil*smp.mat_adv_row];
+	smp.left[kfil*smp.mat_adv_row] = k;
 	
-	if (thd_indx == 0) {
-		smp.matriz[ipos + jcol] = 1; // Modifico el pivote
-		
-		k = smp.top[jcol];
-		smp.top[jcol] = smp.left[ipos];
-		smp.left[ipos] = k;
-	}
-	
-	__syncthreads();
-	
-}
- 
+	return true;
+ }
+
+
 void printStatus(TSimplexGPUs &smp) {
 	printf("%s, (%i, %i)\n", "Tabloide", smp.rest_fin + 6, smp.mat_adv_row);
 	for(int i = 0; i < smp.rest_fin + 6; i++) {
 		for(int j = 0; j < smp.mat_adv_row; j++) {
-			printf("%.2f\t", smp.tabloide[i*smp.mat_adv_row + j] );
+			printf("%.2f\t", (double) smp.tabloide[i*smp.mat_adv_row + j] );
+			//printf("%E \t", smp.tabloide[i*smp.NColumnas + j] );
+			//printf("(%i,%i,%i)%f  \t", i, j, (i*smp.NColumnas) + j, smp.tabloide[(i*smp.NColumnas) + j]);
 		}
 		printf("\n");
 	}
-} 
- 
-__device__ void printStatusDev(TSimplexGPUs &smp) {
-	printf("%s, (%i, %i)\n", "Tabloide", smp.rest_fin + 6, smp.mat_adv_row);
-	for(int i = 0; i < smp.rest_fin + 6; i++) {
-		for(int j = 0; j < smp.mat_adv_row; j++) {
-			printf("%.2f\t", smp.tabloide[i*smp.mat_adv_row + j] );
-		}
-		printf("\n");
-	}
+	
 }
 
 void printResult(TSimplexGPUs &smp) {
@@ -1024,8 +672,8 @@ void printResult(TSimplexGPUs &smp) {
 	for(int i = 0; i < smp.var_x; i++) {
 		bi = findVarXbValue(smp, i);
 		val = bi + smp.inf[i];
-		if (val != 0 || bi != 0) {
-			printf("x%i = %.12f  (Xbi = %.12f)\n", findVarIndex(smp, i),  val, bi);
+		if (val != 0) {
+			printf("x%i = %.2f  (Xbi = %.2f)\n", findVarIndex(smp, i),  val, bi);
 		}
 	}
 	
@@ -1035,57 +683,19 @@ void printResult(TSimplexGPUs &smp) {
 			varType = smp.var_type[i];
 			if (varType == 1) {
 				val = bi;
-				printf("s%i = %f \n", findVarIndex(smp, i), val);
+				printf("s%i = %.2f \n", findVarIndex(smp, i), val);
 			} else {
 				val = bi;
-				printf("a - error%i = %f\n", findVarIndex(smp, i),  val);
+				printf("a - error%i = %.2f\n", findVarIndex(smp, i),  val);
 			}
 		}
 	}
-	printf("Z min = %.2f \n", smp.tabloide[3]);
-}
-
-__device__ void printResultDev(TSimplexGPUs &smp) {
-	printf("%s\n", "Resultado");
-	double bi, val;
-	int varType;
 	
-	for(int i = 0; i < smp.var_x; i++) {
-		bi = findVarXbValueDev(smp, i);
-		val = bi + smp.inf[i];
-		if (val != 0 || bi != 0) {
-			printf("x%i = %.12f  (Xbi = %.12f)\n", findVarIndexDev(smp, i),  val, bi);
-		}
-	}
-	
-	for(int i = smp.var_x; i < smp.var_all; i++) {
-		bi = findVarXbValueDev(smp, i);
-		if (bi != 0) {
-			varType = smp.var_type[i];
-			if (varType == 1) {
-				val = bi;
-				printf("s%i = %.12f\n", findVarIndexDev(smp, i), val);
-			} else {
-				val = bi;
-				printf("a - error%i = %.12f\n", findVarIndexDev(smp, i),  val);
-			}
-		}
-	}
 	printf("Z min = %.2f \n", smp.tabloide[3]);
+	
 }
 
 double findVarXbValue(TSimplexGPUs &smp, int indx) {
-	int lefti;
-	for(int i = 0; i < smp.rest_fin; i++) {
-		lefti = ((int) smp.left[i*smp.mat_adv_row]);
-		if (indx == (lefti - 1)) {
-			return smp.Xb[i*smp.mat_adv_row];
-		}
-	}
-	return 0;
-}
-
-__device__ double findVarXbValueDev(TSimplexGPUs &smp, int indx) {
 	int lefti;
 	for(int i = 0; i < smp.rest_fin; i++) {
 		lefti = ((int) smp.left[i*smp.mat_adv_row]);
@@ -1109,18 +719,6 @@ int findVarIndex(TSimplexGPUs &smp, int indx) {
 	return vind;
 }
 
-__device__ int findVarIndexDev(TSimplexGPUs &smp, int indx) {
-	int vind = 1;
-	int varType = smp.var_type[indx];
-	if ( varType == 0) {
-		return indx  + 1;
-	} else {
-		for (int i = 0; i < indx; i++) {
-			if (smp.var_type[i] == varType) vind++;
-		}
-	}
-	return vind;
-}
 
 TabloideGPUs getTabloideCasoTipo() {
 	double tabl[] = {
