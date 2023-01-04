@@ -3,14 +3,12 @@
 #include "simplex_big_m.h"
 
 __constant__ double CasiCero_Simplex = 1.0E-7;
-// const double MaxNReal = 1.7E+308; // Aprox, CONFIRMAR SI ESTO ES CORRECTO
 
 __constant__ double M = 1.0E+15; // 1.0E+150; 100; //sqrt(MaxNReal);
 const double eMe = 1.0E+15; // 1.0E+150; 100;
 
-const int MAX_VARS = 512; // Esto sera usado para pedir shared memory
-const int MAX_RES = 512; // Esto sera usado para pedir shared memory
-
+const int MAX_VARS = 512; // Esto es usado para pedir shared memory
+const int MAX_RES = 512; // Esto es usado para pedir shared memory
 
 // 8 * 32 = 256
 const int BLOCK_SIZE_E_1X = 32;  // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#thread-hierarchy the arrange of the warp in the block is giving for a two-dimensional block of size (Dx, Dy),the thread ID of a thread of index (x, y) is (x + y Dx)
@@ -26,7 +24,7 @@ const int BLOCK_SIZE_E_3Y = 1;
 const int BLOCK_SIZE_E_4X = 32; // 32
 const int BLOCK_SIZE_E_4Y = 8; // 4
 
-const int MAX_SIMPLEX_ITERATIONS = 512; // 128;
+const int MAX_SIMPLEX_ITERATIONS = 256; // 128;
 
 const int TRAYECTORIAS = 1; // 1000;
 
@@ -67,13 +65,6 @@ __global__ void kernel_resolver_simplex_big_m(TDAOfSimplexGPUs simplex_array) {
 	resolver_simplex_big_m(simplex_array[blockIdx.x]);
 }
 
-__global__ void kernel_test(TDAOfSimplexGPUs d_simplex_array) {
-	printf("Hello World from GPU!\n");
-	printf("%.2f\n", d_simplex_array[0][2]);
-	printf("%.2f\n", d_simplex_array[0][16]);
-	printf("End test GPU!\n");
-}
-
 void printResult(TSimplexGPUs &smp);
 void printStatus(TSimplexGPUs &smp);
 int findVarIndex(TSimplexGPUs &smp, int indx);
@@ -93,7 +84,6 @@ void resolver_ejemplo_caso_tipo();
 TabloideGPUs getTabloideCasoTipo();
 TabloideGPUs getTabloideCasoTipoGrande();
 TabloideGPUs getTabloideCasoTipoExtraGrande();
-
 
 void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
 

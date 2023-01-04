@@ -14,7 +14,7 @@ const double MaxNReal = 1.7E+308; // Aprox, CONFIRMAR SI ESTO ES CORRECTO
 
 const double M = 1.0E+15; //100; //sqrt(MaxNReal); // 1.0E+15
 
-const int MAX_SIMPLEX_ITERATIONS = 1512; // 128;
+const int MAX_SIMPLEX_ITERATIONS = 256; // 128;
 
 void resolver_cpu(TabloideGPUs &simplex) ;
 TSimplexGPUs desestructurarTabloide(TabloideGPUs &tabloide);
