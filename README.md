@@ -24,4 +24,6 @@ La version v7_simplex_two_phase_cpu_prog implementa el algorimo Simplex Two Phas
 
 La version v8_simplex_two_phase_gpu_prog implementa el algorimo Simplex Two Phase en una programa c para GPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa.
 
+La version v8_simplex_two_phase_gpu_prog implementa el algorimo Big M en una programa c para GPU que contiene ejemplos usados por SIMSEE que se pueden correr directamente ejecutando el programa. Esta version de Big M intenta mejorar la performance en GPU para la mejor version de las anteriores.
+
 simsee_code_notes.pas Code used in SIMSEE. toStruct: convert SIMSEE simplex structure in GPUs tabloide structure. DumpSistemaToPlainTableForGPUs: Dump in a file the GPUs tabloide structure in a file
