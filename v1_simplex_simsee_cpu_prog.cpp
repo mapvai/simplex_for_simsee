@@ -10,6 +10,12 @@
 #include <cstdlib>
 #include <iomanip>
 
+#ifdef _WIN32
+#include <time.h>
+#else
+#include <sys/time.h>
+#endif
+
 using namespace std;
 
 #include "simplex_simsee.h"
@@ -53,6 +59,8 @@ int darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_RestriccionesRed
 void read_csv_file(const char* filename, TSimplexGPUs& simplex);
 void clean_copy_simplex(TSimplexGPUs& simplex_from, TSimplexGPUs& simplex_to);
 void printTSimplexGPUs(const TSimplexGPUs& simplex);
+bool findVarXbValue(const TSimplexGPUs &smp, int indx, double &value);
+double abs(double x);
 
 int main(int argc, char** argv) {
 	
@@ -71,16 +79,24 @@ int main(int argc, char** argv) {
 	TSimplexGPUs simplex;
 	read_csv_file(filename, simplex);
 	
-	//printTSimplexGPUs(simplex);
+	printTSimplexGPUs(simplex);
 	
 	
 	for (int kTrayectoria = 0; kTrayectoria < trayectorias; kTrayectoria++) {
 		clean_copy_simplex(simplex, simplex_array[kTrayectoria]);
 	}
+  
+  struct timeval t_i, t_f;
+	float t_elap;
+  gettimeofday(&t_i,NULL);
 	
 	for (int kTrayectoria = 0; kTrayectoria < trayectorias; kTrayectoria++) {
 		resolver_cpu(simplex_array[kTrayectoria]);
 	}
+ 
+  gettimeofday(&t_f,NULL);
+  t_elap = ((double) t_f.tv_sec * 1000.0 + (double) t_f.tv_usec / 1000.0 - ((double) t_i.tv_sec * 1000.0 + (double) t_i.tv_usec / 1000.0));
+	printf("gettimeofday: v1_simplex_simsee_cpu_prog  %f\n ", t_elap);
 	
 	std::cout << "\nResuelto\n";
 	
@@ -123,7 +139,8 @@ void resolver_cpu(TSimplexGPUs &simplex) { //,  TSimplexVars &vars) {
 		result = -33;
 		return;
 	}
-
+  
+  // printf("%s %i, %i, %i, %i \n", "resolver_igualdades params: ", cnt_columnasFijadas, simplex.cnt_varfijas, simplex.cnt_RestriccionesRedundantes, cnt_igualdades);
 	if (resolverIgualdades(simplex, cnt_columnasFijadas, simplex.cnt_varfijas, simplex.cnt_RestriccionesRedundantes, cnt_igualdades) != 1) {
 		mensajeDeError = "PROBLEMA INFACTIBLE - No logré resolver las restricciones de igualdad.";
 		printf("%s\n", mensajeDeError.c_str());
@@ -131,14 +148,21 @@ void resolver_cpu(TSimplexGPUs &simplex) { //,  TSimplexVars &vars) {
 		return;
 	}
 
+	int count = 0;
+
 	lbl_inicio:
 
 	reordenarPorFactibilidad(simplex, simplex.cnt_RestriccionesRedundantes, cnt_RestrInfactibles); // MAP: cnt_RestrInfactibles es modificada dentro del proc
-	
+ 
+  int iter = 0;
 	res = 1;
 	while (cnt_RestrInfactibles > 0) {
 		res = pasoBuscarFactible(simplex, cnt_RestrInfactibles, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
-
+    
+    iter ++;
+    // printf("Res %d, %d\n", res, iter);
+    // if (iter == 30) { return; }
+    
 		switch (res) {
 			case 0: 
 				if (cnt_RestrInfactibles > 0) {
@@ -159,10 +183,14 @@ void resolver_cpu(TSimplexGPUs &simplex) { //,  TSimplexVars &vars) {
 				result = -12;
 				return;
 		}
+    // printf("vuetla 1 \n");
 	}
+ 
+  // return;
 
 	while (res == 1) {
 		res = darpaso(simplex, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
+		count ++;
 		if (res == -1) {
 			mensajeDeError = "Error -- NO encontramos pivote bueno dando paso";
 			printf("%s\n", mensajeDeError.c_str());
@@ -176,7 +204,8 @@ void resolver_cpu(TSimplexGPUs &simplex) { //,  TSimplexVars &vars) {
 	}
 		
 	result = res;
-	printf("%s: %d\n", "Finish, result = ", result);
+	
+	// printf("%s: %d iteraciones %i\n", "Finish, result = ", result, count);
 }
 
 
@@ -545,16 +574,16 @@ int resolverIgualdades(TSimplexGPUs &smp, int &cnt_columnasFijadas, int cnt_varf
 
 	nIgualdadesResueltas = 0;
 	nIgualdadesAResolver = iFilaLibre - cnt_RestriccionesRedundantes; // MAP: Antes iFilaLibre - (cnt_RestriccionesRedundantes + 1),  + 1 debido a que iFilaLibre es uno menos que el original
-	nCerosFilas = (int*)malloc((smp.NRestricciones + 1)*sizeof(int)); // MAP: antes setLength(nCerosFilas, nf);
-	nCerosCols = (int*)malloc((smp.NVariables + 1)*sizeof(int));// MAP: antes setLength(nCerosCols, nc);
+	nCerosFilas = (int*)calloc((smp.NRestricciones + 1), sizeof(int)); // MAP: antes setLength(nCerosFilas, nf);
+	nCerosCols = (int*)calloc((smp.NVariables + 1), sizeof(int));// MAP: antes setLength(nCerosCols, nc);
 	while (nIgualdadesResueltas < nIgualdadesAResolver) {
 		//    res:= pasoBuscarFactibleIgualdad( cnt_RestriccionesRedundantes + 1 + nIgualdadesResueltas );
 		//    res:= pasoBuscarFactibleIgualdad2( cnt_RestriccionesRedundantes + 1 + nIgualdadesResueltas );
 		//    res:= pasoBuscarFactibleIgualdad3( nIgualdadesAResolver - nIgualdadesResueltas);
 
-		// printf("Launch  pasoBuscarFactibleIgualdad4 with:  %d, %d, %d, %d\n", nCerosFilas[0], nCerosCols[0], cnt_columnasFijadas, cnt_RestriccionesRedundantes);
+		// printf("Launch  pasoBuscarFactibleIgualdad4 with:  %d, %d, %d, %d, %d\n", nIgualdadesAResolver - nIgualdadesResueltas, nCerosFilas[0], nCerosCols[0], cnt_columnasFijadas, cnt_RestriccionesRedundantes);
 		res = pasoBuscarFactibleIgualdad4(smp, nIgualdadesAResolver - nIgualdadesResueltas, nCerosFilas, nCerosCols, cnt_columnasFijadas, cnt_RestriccionesRedundantes);
-		
+   
 		if (res ==1) {
 			nIgualdadesResueltas = nIgualdadesResueltas + 1;
 			cnt_columnasFijadas++;
@@ -1428,4 +1457,30 @@ void printTSimplexGPUs(const TSimplexGPUs& simplex) {
         std::cout << std::endl;
     }
     std::cout << std::endl;
+    
+    std::cout << "Result:" << std::endl;
+    double solxj;
+    for (int j = 0; j < simplex.NVariables; j++) {
+        if (findVarXbValue(simplex, j, solxj)) {
+          std::cout << (solxj + simplex.x_inf[j]) << "; ";
+        } else {
+          std::cout << 0 << "; ";
+        }
+    }
+    
+    std::cout << std::endl;
+}
+
+bool findVarXbValue(const TSimplexGPUs &smp, int indx, double &value) {
+	for(int i = 0; i < smp.NRestricciones; i++) {
+		if (indx == -smp.left[i] - 1) {
+      value = smp.mat[i * (smp.NVariables + 1) + smp.NVariables];
+			return true;
+		}
+	}
+	return false;
+}
+
+double abs(double x) {
+  return x < 0 ? -x : x;
 }
