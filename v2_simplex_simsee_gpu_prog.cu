@@ -1,13 +1,9 @@
-#include <stdio.h>
-#include <math.h>
-#include <stdlib.h>	/* abs */
 #include <assert.h>	/* assert */
 #include <iostream>
 #include <string>
 #include <fstream>
 #include <sstream>
 #include <cstring>
-#include <cstdlib>
 #include <iomanip>
 using namespace std;
 
@@ -18,7 +14,8 @@ using namespace std;
 
 #include "simplex_simsee.h"
 
-#define BLOCK_SIZE 32
+#define BLOCK_SIZE_P_I 64 //  = 2 * WARP SIZE
+#define BLOCK_SIZE_GR 32 //  = 5 * WARP SIZE
 
 const double CasiCero_Simplex = 1.0E-7;
 const double CasiCero_Simplex_CotaSup = CasiCero_Simplex * 1.0E+3;
@@ -30,11 +27,13 @@ const double MaxNReal = 1.7E+308; // Aprox, CONFIRMAR SI ESTO ES CORRECTO
 void read_csv_file(const char* filename, TSimplexGPUs& simplex);
 void clean_copy_simplex(TSimplexGPUs& simplex_from, TSimplexGPUs& simplex_to);
 void printTSimplexGPUs(const TSimplexGPUs& simplex);
-void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
+bool findVarXbValue(const TSimplexGPUs &smp, int indx, double &value);
+
+void resolver_cuda(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars, int NTrayectorias, int maxNvariables, int maxNrestricciones);
 
 void ini_mem(
-	TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array,  
-	int NTrayectorias
+	TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars, 
+	int NTrayectorias, int &maxNvariables, int &maxNrestricciones
 );
 
 void copy_mem_back(
@@ -42,15 +41,17 @@ void copy_mem_back(
 	int NTrayectorias
 );
 			
-void free_mem(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias);
+void free_mem(TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars, int NTrayectorias);
 
-__device__ void resolver_gpu(TSimplexGPUs &simplex) ;
-__device__ int fijarCajasLaminares(TSimplexGPUs &smp, int &cnt_varfijas);
+__forceinline__ __device__ int devabs(int x);
+__forceinline__ __device__ double devabs(double x);
+
+//using ::abs;
+
 __device__ void posicionarPrimeraLibre(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_fijadas, int &cnt_columnasFijadas, int &kPrimeraLibre) ; // Esta funcion es interna, no se necesita declarar aca?
 __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_columnasFijadas, int cnt_RestriccionesRedundantes);
 __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol);
-__device__ void actualizo_iitop(TSimplexGPUs &smp, int k);
-__device__ void actualizo_iileft(TSimplexGPUs &smp, int k) ;
+//__device__ void intercambiar_multihilo(TSimplexGPUs &smp, int kfil, int jcol);
 __device__ void intercambioColumnas(TSimplexGPUs &smp, int j1, int j2);
 __device__ void intercambioFilas(TSimplexGPUs &smp, int k1, int k2);
 __device__ int buscarMejorPivoteEnCol(TSimplexGPUs &smp, int jCol, int iFilaFrom, int iFilaHasta);
@@ -67,14 +68,47 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 __device__ bool cambio_var_cota_sup_en_columna(TSimplexGPUs &smp, int q);
 __device__ int locate_qOK(TSimplexGPUs &smp, int p, int jhasta, int jti, int cnt_RestriccionesRedundantes);
 __device__ bool test_qOK(TSimplexGPUs &smp, int p, int q, int jti, double &apq, int cnt_RestriccionesRedundantes);
-__device__ int darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes);
+__device__ void darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes, int &res);
+__device__ void resolver_etapa_cnt_igcount(TSimplexGPUs &simplex,  TSimplexVars &d_svars) ;
+__device__ void resolver_etapa_fijar_cajlam(TSimplexGPUs &simplex,  TSimplexVars &d_svars) ;
+__device__ void resolver_fijar_variables(TSimplexGPUs &simplex, TSimplexVars &d_svars);
+__device__ void resolver_enfilar_variables_libres(TSimplexGPUs &simplex, TSimplexVars &d_svars);
+__device__ void resolver_igualdades(TSimplexGPUs &simplex, TSimplexVars &d_svars);
+__device__ void resolver_reordenar_por_factibilidad(TSimplexGPUs &simplex, TSimplexVars &d_svars);
+__device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_svars) ;
 
+__global__ void kernel_resolver_etapa_cnt_igcount(TDAOfSimplexGPUs simplex_array,  TSimplexVars * d_svars) {
+	resolver_etapa_cnt_igcount(simplex_array[blockIdx.x], d_svars[blockIdx.x]);
+} 
 
-__global__ void kernel_resolver(TDAOfSimplexGPUs simplex_array, int NTrayectorias) {
-	
-	if (threadIdx.x == 0) /*uso solo el primer hilo del bloque por ahora*/ resolver_gpu(simplex_array[blockIdx.x]);
-	
+__global__ void kernel_resolver_etapa_fijar_cajlam(TDAOfSimplexGPUs simplex_array,  TSimplexVars * d_svars) {	
+	resolver_etapa_fijar_cajlam(simplex_array[blockIdx.x], d_svars[blockIdx.x]);
 }
+
+__global__ void kernel_resolver_fijar_variables(TDAOfSimplexGPUs simplex_array, TSimplexVars * d_svars, int NTrayectorias) {
+	int index = blockIdx.x*blockDim.x + threadIdx.x;
+	if (index < NTrayectorias) resolver_fijar_variables(simplex_array[index], d_svars[index]);
+}
+
+__global__ void kernel_resolver_enfilar_variables_libres(TDAOfSimplexGPUs simplex_array, TSimplexVars * d_svars, int NTrayectorias) {
+	int index = blockIdx.x*blockDim.x + threadIdx.x;
+	if (index < NTrayectorias) resolver_enfilar_variables_libres(simplex_array[index], d_svars[index]);
+}
+
+__global__ void kernel_resolver_igualdades(TDAOfSimplexGPUs simplex_array, TSimplexVars * d_svars, int NTrayectorias) {
+	int index = blockIdx.x*blockDim.x + threadIdx.x;
+	if (index < NTrayectorias) resolver_igualdades(simplex_array[index], d_svars[index]);
+}
+
+__global__ void kernel_resolver_reordenar_por_factibilidad(TDAOfSimplexGPUs simplex_array, TSimplexVars * d_svars, int NTrayectorias) {
+	int index = blockIdx.x*blockDim.x + threadIdx.x;
+	if (index < NTrayectorias) resolver_reordenar_por_factibilidad(simplex_array[index], d_svars[index]);
+}
+
+__global__ void kernel_resolver_paso_iterativo(TDAOfSimplexGPUs simplex_array, TSimplexVars * d_svars) {
+	resolver_paso_iterativo(simplex_array[blockIdx.x], d_svars[blockIdx.x]);
+}
+
 
 int main(int argc, char** argv) {
 	
@@ -87,26 +121,33 @@ int main(int argc, char** argv) {
 	int NTrayectorias = atoi(argv[2]);
 	TDAOfSimplexGPUs simplex_array = (TSimplexGPUs*)malloc(NTrayectorias*sizeof(TSimplexGPUs));
 	
-	simplex_array = new TSimplexGPUs[NTrayectorias];
-	
 	TSimplexGPUs simplex;
 	read_csv_file(filename, simplex);
 		
 	TDAOfSimplexGPUs d_simplex_array; 
 	TDAOfSimplexGPUs h_simplex_array;
 	
+	TDAOfSimplexVars d_svars;
+	
 	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
 		clean_copy_simplex(simplex, simplex_array[kTrayectoria]);			  
 	}
+ 
+	printTSimplexGPUs(simplex_array[0]);
+  
+	std::cout << "\nINICIANDO\n";
 	
-	ini_mem(&simplex_array, &h_simplex_array, &d_simplex_array, NTrayectorias);
+	int maxNvariables = 0;
+	int maxNrestricciones = 0;
+	
+	ini_mem(simplex_array, h_simplex_array, d_simplex_array, d_svars, NTrayectorias, maxNvariables, maxNrestricciones);
 	
 	{CLK_POSIX_INIT;
 	CLK_POSIX_START;	
 	CLK_CUEVTS_INIT;
 	CLK_CUEVTS_START;
 		
-	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
+	resolver_cuda(d_simplex_array, d_svars, NTrayectorias, maxNvariables, maxNrestricciones);
 	
 	CLK_CUEVTS_STOP;
 	CLK_CUEVTS_ELAPSED("v2_simplex_simsee_prog: ");
@@ -117,65 +158,19 @@ int main(int argc, char** argv) {
 	
 	std::cout << "\nResuelto\n";
 	
-	copy_mem_back(&simplex_array, &h_simplex_array, &d_simplex_array, NTrayectorias);
+	copy_mem_back(simplex_array, h_simplex_array, d_simplex_array, NTrayectorias);
+ 
+  printTSimplexGPUs(simplex_array[0]);
 	
-	free_mem(d_simplex_array, h_simplex_array, NTrayectorias);
+	free_mem(h_simplex_array, d_simplex_array, d_svars, NTrayectorias);
 	free(h_simplex_array);
-	
-}
+	free(simplex_array);
 
-void free_mem(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array, int NTrayectorias) {	
-	
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		cudaFree(h_simplex_array[kTrayectoria].x_inf);
-		cudaFree(h_simplex_array[kTrayectoria].x_sup);
-		cudaFree(h_simplex_array[kTrayectoria].flg_x);
-		cudaFree(h_simplex_array[kTrayectoria].top);
-		cudaFree(h_simplex_array[kTrayectoria].flg_y);
-		cudaFree(h_simplex_array[kTrayectoria].left);
-        cudaFree(h_simplex_array[kTrayectoria].mat);
-	}	
-	cudaFree(d_simplex_array);	
-	cudaError_t err = cudaGetLastError(); 
-	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 free_mem inside error", cudaGetErrorString(err));
-	
-}
-
-void copy_mem_back(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array,  
-	int NTrayectorias
-) {	
-	
-	int NEnteras, NVariables, NRestricciones, cnt_varfijas, cnt_RestriccionesRedundantes;
-
-	cudaMemcpy(h_simplex_array, d_simplex_array, NTrayectorias*sizeof(TSimplexGPUs), cudaMemcpyDeviceToHost);
-
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		int NEnteras = h_simplex_array[kTrayectoria].NEnteras;
-		int NVariables = h_simplex_array[kTrayectoria].NVariables;
-		int NRestricciones = h_simplex_array[kTrayectoria].NRestricciones;
-		int cnt_varfijas = h_simplex_array[kTrayectoria].cnt_varfijas;
-		int cnt_RestriccionesRedundantes = h_simplex_array[kTrayectoria].cnt_RestriccionesRedundantes;
-
-		simplex_array[kTrayectoria].NEnteras = NEnteras;
-		simplex_array[kTrayectoria].NVariables = NVariables;	
-		simplex_array[kTrayectoria].NRestricciones = NRestricciones;		
-		simplex_array[kTrayectoria].cnt_varfijas = cnt_varfijas;
-		simplex_array[kTrayectoria].cnt_RestriccionesRedundantes = cnt_RestriccionesRedundantes;
-		cudaMemcpy(simplex_array[kTrayectoria].x_inf, h_simplex_array[kTrayectoria].x_inf, NVariables*sizeof(double), cudaMemcpyDeviceToHost);
-		cudaMemcpy(simplex_array[kTrayectoria].x_sup, h_simplex_array[kTrayectoria].x_sup, NVariables*sizeof(double), cudaMemcpyDeviceToHost);
-		cudaMemcpy(simplex_array[kTrayectoria].flg_x, h_simplex_array[kTrayectoria].flg_x, NVariables*sizeof(int8_t), cudaMemcpyDeviceToHost);
-		cudaMemcpy(simplex_array[kTrayectoria].top,   h_simplex_array[kTrayectoria].top, NVariables*sizeof(int), cudaMemcpyDeviceToHost);
-		cudaMemcpy(simplex_array[kTrayectoria].flg_y, h_simplex_array[kTrayectoria].flg_y, NRestricciones*sizeof(int8_t), cudaMemcpyDeviceToHost);
-		cudaMemcpy(simplex_array[kTrayectoria].left,  h_simplex_array[kTrayectoria].left, NRestricciones*sizeof(int), cudaMemcpyDeviceToHost);
-
-		cudaMemcpy(simplex_array[kTrayectoria].mat, h_simplex_array[kTrayectoria].mat, (NVariables + 1)*(NRestricciones + 1)*sizeof(double), cudaMemcpyDeviceToHost);
-	}	
-	
 }
 
 void ini_mem(
-	TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array,  
-	int NTrayectorias
+	TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars,  
+	int NTrayectorias, int &maxNvariables, int &maxNrestricciones
 ) {
 
 	h_simplex_array = (TSimplexGPUs*)malloc(NTrayectorias*sizeof(TSimplexGPUs));
@@ -188,6 +183,9 @@ void ini_mem(
 		NRestricciones = simplex_array[kTrayectoria].NRestricciones;
 		cnt_varfijas = simplex_array[kTrayectoria].cnt_varfijas;
 		cnt_RestriccionesRedundantes = simplex_array[kTrayectoria].cnt_RestriccionesRedundantes;
+		
+		if (NVariables > maxNvariables) maxNvariables = NVariables;
+		if (NRestricciones > maxNrestricciones) maxNrestricciones = NRestricciones;
 		
 		h_simplex_array[kTrayectoria].NEnteras = NEnteras;
 		h_simplex_array[kTrayectoria].NVariables = NVariables;	
@@ -211,14 +209,67 @@ void ini_mem(
 		cudaMemcpy(h_simplex_array[kTrayectoria].top, simplex_array[kTrayectoria].top, NVariables*sizeof(int), cudaMemcpyHostToDevice);
 		cudaMemcpy(h_simplex_array[kTrayectoria].flg_y, simplex_array[kTrayectoria].flg_y, NRestricciones*sizeof(int8_t), cudaMemcpyHostToDevice);
 		cudaMemcpy(h_simplex_array[kTrayectoria].left, simplex_array[kTrayectoria].left, NRestricciones*sizeof(int), cudaMemcpyHostToDevice);
-		cudaMemcpy(h_simplex_array[kTrayectoria].mat, simplex_array[kTrayectoria].mat, NVariables*sizeof(double), cudaMemcpyHostToDevice);
+		cudaMemcpy(h_simplex_array[kTrayectoria].mat, simplex_array[kTrayectoria].mat, (NVariables + 1)*(NRestricciones + 1)*sizeof(double), cudaMemcpyHostToDevice);
 	}
 
 	cudaMalloc(&d_simplex_array, NTrayectorias*sizeof(TSimplexGPUs));
-	cudaMemcpy(d_simplex_array, h_simplex_array, NTrayectorias*sizeof(TSimplexGPUs), cudaMemcpyHostToDevice); 
+	cudaMemcpy(d_simplex_array, h_simplex_array, NTrayectorias*sizeof(TSimplexGPUs), cudaMemcpyHostToDevice);
+	
+	cudaMalloc(&d_svars, NTrayectorias*sizeof(TSimplexVars));
+	cudaMemset(d_svars, 0, NTrayectorias*sizeof(TSimplexVars));
 
 	cudaError_t err = cudaGetLastError(); 
 	if (err != cudaSuccess) printf("%s: %s\n", "CUDA ini_mem inside error", cudaGetErrorString(err));
+	
+}
+
+void copy_mem_back(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array,  
+	int NTrayectorias
+) {	
+	
+	int NEnteras, NVariables, NRestricciones, cnt_varfijas, cnt_RestriccionesRedundantes;
+
+	cudaMemcpy(h_simplex_array, d_simplex_array, NTrayectorias*sizeof(TSimplexGPUs), cudaMemcpyDeviceToHost);
+
+	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
+		NEnteras = h_simplex_array[kTrayectoria].NEnteras;
+		NVariables = h_simplex_array[kTrayectoria].NVariables;
+		NRestricciones = h_simplex_array[kTrayectoria].NRestricciones;
+		cnt_varfijas = h_simplex_array[kTrayectoria].cnt_varfijas;
+		cnt_RestriccionesRedundantes = h_simplex_array[kTrayectoria].cnt_RestriccionesRedundantes;
+
+		simplex_array[kTrayectoria].NEnteras = NEnteras;
+		simplex_array[kTrayectoria].NVariables = NVariables;	
+		simplex_array[kTrayectoria].NRestricciones = NRestricciones;		
+		simplex_array[kTrayectoria].cnt_varfijas = cnt_varfijas;
+		simplex_array[kTrayectoria].cnt_RestriccionesRedundantes = cnt_RestriccionesRedundantes;
+		cudaMemcpy(simplex_array[kTrayectoria].x_inf, h_simplex_array[kTrayectoria].x_inf, NVariables*sizeof(double), cudaMemcpyDeviceToHost);
+		cudaMemcpy(simplex_array[kTrayectoria].x_sup, h_simplex_array[kTrayectoria].x_sup, NVariables*sizeof(double), cudaMemcpyDeviceToHost);
+		cudaMemcpy(simplex_array[kTrayectoria].flg_x, h_simplex_array[kTrayectoria].flg_x, NVariables*sizeof(int8_t), cudaMemcpyDeviceToHost);
+		cudaMemcpy(simplex_array[kTrayectoria].top,   h_simplex_array[kTrayectoria].top, NVariables*sizeof(int), cudaMemcpyDeviceToHost);
+		cudaMemcpy(simplex_array[kTrayectoria].flg_y, h_simplex_array[kTrayectoria].flg_y, NRestricciones*sizeof(int8_t), cudaMemcpyDeviceToHost);
+		cudaMemcpy(simplex_array[kTrayectoria].left,  h_simplex_array[kTrayectoria].left, NRestricciones*sizeof(int), cudaMemcpyDeviceToHost);
+
+		cudaMemcpy(simplex_array[kTrayectoria].mat, h_simplex_array[kTrayectoria].mat, (NVariables + 1)*(NRestricciones + 1)*sizeof(double), cudaMemcpyDeviceToHost);
+	}	
+	
+}
+
+void free_mem(TDAOfSimplexGPUs &h_simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars, int NTrayectorias) {	
+	
+	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
+		cudaFree(h_simplex_array[kTrayectoria].x_inf);
+		cudaFree(h_simplex_array[kTrayectoria].x_sup);
+		cudaFree(h_simplex_array[kTrayectoria].flg_x);
+		cudaFree(h_simplex_array[kTrayectoria].top);
+		cudaFree(h_simplex_array[kTrayectoria].flg_y);
+		cudaFree(h_simplex_array[kTrayectoria].left);
+        cudaFree(h_simplex_array[kTrayectoria].mat);
+	}	
+	cudaFree(d_simplex_array);
+	cudaFree(d_svars);
+	cudaError_t err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 free_mem inside error", cudaGetErrorString(err));
 	
 }
 
@@ -227,15 +278,15 @@ void read_csv_file(const char* filename, TSimplexGPUs& simplex) {
     string line;
 	
 	if (!file.is_open()) {
-        std::cout << "Error opening file " << filename << std::endl;
-        return;
-    }
-	
-    // skip first line
-    getline(file, line);
-    // read NEnteras, NVariables, NRestricciones, cnt_varfijas, cnt_RestriccionesRedundantes
-    getline(file, line, ';');
-    getline(file, line, ';');
+      std::cout << "Error opening file " << filename << std::endl;
+      return;
+  }
+
+  // skip first line
+  getline(file, line);
+  // read NEnteras, NVariables, NRestricciones, cnt_varfijas, cnt_RestriccionesRedundantes
+  getline(file, line, ';');
+  getline(file, line, ';');
     
 	simplex.NEnteras = stoi(line);
 	
@@ -245,76 +296,76 @@ void read_csv_file(const char* filename, TSimplexGPUs& simplex) {
 	for (int i = 0; i < simplex.NEnteras; i++) {
         getline(file, line);
     }
-    getline(file, line, ';');
-	getline(file, line, ';');
-    simplex.NVariables = stoi(line);
-	
-    getline(file, line); // skip rest of line
-	getline(file, line, ';'); // skip first cell
-	getline(file, line, ';');
-    simplex.NRestricciones = stoi(line);
-	
-    getline(file, line); // skip rest of line
-    getline(file, line, ';');
-	getline(file, line, ';');
-	
-    simplex.cnt_varfijas = stoi(line);
-	
-    getline(file, line); // skip rest of line
-    getline(file, line, ';');
-	getline(file, line, ';');
-    simplex.cnt_RestriccionesRedundantes = stoi(line);
-
-    getline(file, line); // skip rest of line
+  getline(file, line, ';');
+  getline(file, line, ';');
+  simplex.NVariables = stoi(line);
+  
+  getline(file, line); // skip rest of line
+  getline(file, line, ';'); // skip first cell
+  getline(file, line, ';');
+  simplex.NRestricciones = stoi(line);
+  
+  getline(file, line); // skip rest of line
+  getline(file, line, ';');
+  getline(file, line, ';');
+  
+  simplex.cnt_varfijas = stoi(line);
+  
+  getline(file, line); // skip rest of line
+  getline(file, line, ';');
+  getline(file, line, ';');
+  simplex.cnt_RestriccionesRedundantes = stoi(line);
+  
+  getline(file, line); // skip rest of line
 	
 	// skip 2 lines
 	getline(file, line);
 	getline(file, line);
 	
-    // read x_inf
-    simplex.x_inf = new double[simplex.NVariables];
-    getline(file, line, ';'); // jump first value
-    for (int i = 0; i < simplex.NVariables; i++) {
-        getline(file, line, ';');
-		// std::cout << " " << line << std::endl;
-        simplex.x_inf[i] = stod(line);
-    }
-    getline(file, line); // complete the consumption of the line
+  // read x_inf
+  simplex.x_inf = new double[simplex.NVariables];
+  getline(file, line, ';'); // jump first value
+  for (int i = 0; i < simplex.NVariables; i++) {
+      getline(file, line, ';');
+	// std::cout << " " << line << std::endl;
+      simplex.x_inf[i] = stod(line);
+  }
+  getline(file, line); // complete the consumption of the line
 
-    // read x_sup
-    simplex.x_sup = new double[simplex.NVariables];
+  // read x_sup
+  simplex.x_sup = new double[simplex.NVariables];
 	getline(file, line, ';'); // jump first value
-    for (int i = 0; i < simplex.NVariables; i++) {
-        getline(file, line, ';');
-        simplex.x_sup[i] = stod(line);
-    }
+  for (int i = 0; i < simplex.NVariables; i++) {
+      getline(file, line, ';');
+      simplex.x_sup[i] = stod(line);
+  }
 	getline(file, line); // complete the consumption of the line
 	
-    // read flg_x
-    simplex.flg_x = new int8_t[simplex.NVariables];
+  // read flg_x
+  simplex.flg_x = new int8_t[simplex.NVariables];
 	getline(file, line, ';'); // jump first value
-    for (int i = 0; i < simplex.NVariables; i++) {
-        getline(file, line, ';');
-        simplex.flg_x[i] = stoi(line);
-    }
+  for (int i = 0; i < simplex.NVariables; i++) {
+      getline(file, line, ';');
+      simplex.flg_x[i] = stoi(line);
+  }
 	getline(file, line); // complete the consumption of the line
 	
 	// read flg_y
     simplex.flg_y = new int8_t[simplex.NRestricciones];
 	getline(file, line, ';'); // jump first value
-    for (int i = 0; i < simplex.NRestricciones; i++) {
-        getline(file, line, ';');
-        simplex.flg_y[i] = stoi(line);
-    }
+  for (int i = 0; i < simplex.NRestricciones; i++) {
+      getline(file, line, ';');
+      simplex.flg_y[i] = stoi(line);
+  }
 	getline(file, line); // complete the consumption of the line
 	
     // read top
     simplex.top = new int[simplex.NVariables];
 	getline(file, line, ';'); // jump first value
-    for (int i = 0; i < simplex.NVariables; i++) {
-        getline(file, line, ';');
-        simplex.top[i] = stoi(line);
-    }
+  for (int i = 0; i < simplex.NVariables; i++) {
+      getline(file, line, ';');
+      simplex.top[i] = stoi(line);
+  }
 	getline(file, line); // complete the consumption of the line
 
     // read left
@@ -348,41 +399,41 @@ void read_csv_file(const char* filename, TSimplexGPUs& simplex) {
 
 void clean_copy_simplex(TSimplexGPUs& simplex_from, TSimplexGPUs& simplex_to) {
     
-    simplex_to.NEnteras = simplex_from.NEnteras;
-    simplex_to.NVariables = simplex_from.NVariables;
-    simplex_to.NRestricciones = simplex_from.NRestricciones;
-    simplex_to.cnt_varfijas = simplex_from.cnt_varfijas;
-    simplex_to.cnt_RestriccionesRedundantes = simplex_from.cnt_RestriccionesRedundantes;
-    
-	simplex_to.x_inf = new double[simplex_to.NVariables];
-    for (int i = 0; i < simplex_to.NVariables; i++) {
-        simplex_to.x_inf[i] = simplex_from.x_inf[i];
-    }
-	
-	simplex_to.x_sup = new double[simplex_to.NVariables];
-    for (int i = 0; i < simplex_to.NVariables; i++) {
-        simplex_to.x_sup[i] = simplex_from.x_sup[i];
-    }
-	
-	simplex_to.flg_x = new int8_t[simplex_to.NVariables];
-    for (int i = 0; i < simplex_to.NVariables; i++) {
-        simplex_to.flg_x[i] = simplex_from.flg_x[i];
-    }
-	
-	simplex_to.flg_y = new int8_t[simplex_to.NRestricciones];
-    for (int i = 0; i < simplex_to.NRestricciones; i++) {
-        simplex_to.flg_y[i] = simplex_from.flg_y[i];
-    }
-	
-	simplex_to.top = new int[simplex_to.NVariables];
-    for (int i = 0; i < simplex_to.NVariables; i++) {
-        simplex_to.top[i] = simplex_from.top[i];
-    }
-	
-	simplex_to.left = new int[simplex_to.NRestricciones];
-    for (int i = 0; i < simplex_to.NRestricciones; i++) {
-        simplex_to.left[i] = simplex_from.left[i];
-    }
+  simplex_to.NEnteras = simplex_from.NEnteras;
+  simplex_to.NVariables = simplex_from.NVariables;
+  simplex_to.NRestricciones = simplex_from.NRestricciones;
+  simplex_to.cnt_varfijas = simplex_from.cnt_varfijas;
+  simplex_to.cnt_RestriccionesRedundantes = simplex_from.cnt_RestriccionesRedundantes;
+  
+  simplex_to.x_inf = new double[simplex_to.NVariables];
+  for (int i = 0; i < simplex_to.NVariables; i++) {
+      simplex_to.x_inf[i] = simplex_from.x_inf[i];
+  }
+  
+  simplex_to.x_sup = new double[simplex_to.NVariables];
+  for (int i = 0; i < simplex_to.NVariables; i++) {
+      simplex_to.x_sup[i] = simplex_from.x_sup[i];
+  }
+  
+  simplex_to.flg_x = new int8_t[simplex_to.NVariables];
+  for (int i = 0; i < simplex_to.NVariables; i++) {
+      simplex_to.flg_x[i] = simplex_from.flg_x[i];
+  }
+  
+  simplex_to.flg_y = new int8_t[simplex_to.NRestricciones];
+  for (int i = 0; i < simplex_to.NRestricciones; i++) {
+      simplex_to.flg_y[i] = simplex_from.flg_y[i];
+  }
+  
+  simplex_to.top = new int[simplex_to.NVariables];
+  for (int i = 0; i < simplex_to.NVariables; i++) {
+      simplex_to.top[i] = simplex_from.top[i];
+  }
+  
+  simplex_to.left = new int[simplex_to.NRestricciones];
+  for (int i = 0; i < simplex_to.NRestricciones; i++) {
+      simplex_to.left[i] = simplex_from.left[i];
+  }
 	
 	// read matrix
 	simplex_to.mat = new double[(simplex_to.NRestricciones + 1) * (simplex_to.NVariables + 1)];
@@ -393,146 +444,318 @@ void clean_copy_simplex(TSimplexGPUs& simplex_from, TSimplexGPUs& simplex_to) {
 	}
 }
 
+void printTSimplexGPUs(const TSimplexGPUs& simplex) {
+    std::cout << "TSimplexGPUs: " << std::endl;
+    std::cout << "NEnteras: " << simplex.NEnteras << std::endl;
+    std::cout << "NVariables: " << simplex.NVariables << std::endl;
+    std::cout << "NRestricciones: " << simplex.NRestricciones << std::endl;
+    std::cout << "cnt_varfijas: " << simplex.cnt_varfijas << std::endl;
+    std::cout << "cnt_RestriccionesRedundantes: " << simplex.cnt_RestriccionesRedundantes << std::endl;
 
-void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexGPUs &h_simplex_array,
-	int NTrayectorias
-) {
+    std::cout << "x_inf:" << std::endl;
+    for (int i = 0; i < simplex.NVariables; i++) {
+        std::cout << simplex.x_inf[i] << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout <<  "x_sup:" << std::endl;
+    for (int i = 0; i < simplex.NVariables; i++) {
+        std::cout << simplex.x_sup[i] << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "flg_x:" << std::endl;
+    for (int i = 0; i < simplex.NVariables; i++) {
+        std::cout << static_cast<int>(simplex.flg_x[i]) << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "top:" << std::endl;
+    for (int i = 0; i < simplex.NVariables; i++) {
+        std::cout << simplex.top[i] << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "flg_y:" << std::endl;
+    for (int i = 0; i < simplex.NRestricciones; i++) {
+        std::cout << static_cast<int>(simplex.flg_y[i]) << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "left:" << std::endl;
+    for (int i = 0; i < simplex.NRestricciones; i++) {
+        std::cout << simplex.left[i] << "; ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "matrix:" << std::endl;
+    for (int i = 0; i < simplex.NRestricciones + 1; i++) {
+        for (int j = 0; j < simplex.NVariables + 1; j++) {
+            std::cout << simplex.mat[i * (simplex.NVariables + 1) + j] << "; ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+    
+    std::cout << "Result:" << std::endl;
+        double solxj;
+    for (int j = 0; j < simplex.NVariables; j++) {
+        if (findVarXbValue(simplex, j, solxj)) {
+          std::cout << (solxj + simplex.x_inf[j]) << "; ";
+        } else {
+          std::cout << 0 << "; ";
+        }
+    }
+    
+    std::cout << std::endl;
+}
+
+bool findVarXbValue(const TSimplexGPUs &smp, int indx, double &value) {
+	for(int i = 0; i < smp.NRestricciones; i++) {
+		if (indx == -smp.left[i] - 1) {
+      value = smp.mat[i * (smp.NVariables + 1) + smp.NVariables];
+			return true;
+		}
+	}
+	return false;
+}
+
+void resolver_cuda(TDAOfSimplexGPUs &d_simplex_array, TDAOfSimplexVars &d_svars, int NTrayectorias, int maxNvariables, int maxNrestricciones){
 	
-	// Configuro la grilla 
-	const dim3 DimGrida(NTrayectorias, 1);
-	const dim3 DimBlocka(BLOCK_SIZE, 1);
-
-	// Ejecuto el kernel
-	kernel_resolver<<< DimGrida, DimBlocka, 0, 0 >>>(d_simplex_array, NTrayectorias);
+	cudaError_t err;
+	
+	// Ejecuto los kernels
+	const dim3 DimGrid_e1(NTrayectorias, 1);
+	const dim3 DimBlock_e1(maxNrestricciones, 1);
+	kernel_resolver_etapa_cnt_igcount<<< DimGrid_e1, DimBlock_e1, 0, 0 >>>(d_simplex_array, d_svars);
 	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 1 error", cudaGetErrorString(err));
+	
+	const dim3 DimGrid_e2(NTrayectorias, 1);
+	const dim3 DimBlock_e2(maxNvariables, 1);
+	kernel_resolver_etapa_fijar_cajlam<<< DimGrid_e2, DimBlock_e2, 0, 0 >>>(d_simplex_array, d_svars);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 2 error", cudaGetErrorString(err));
+		
+	int cantBloques = ceil((float)NTrayectorias / (float)BLOCK_SIZE_GR);
+	printf("%s: %d\n", "cantBloques fijar_variables: ", cantBloques);
+	const dim3 DimGrid_e3(cantBloques, 1);
+	const dim3 DimBlock_e3(BLOCK_SIZE_GR, 1);
+	kernel_resolver_fijar_variables<<< DimGrid_e3, DimBlock_e3, 0, 0 >>>(d_simplex_array, d_svars, NTrayectorias);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 3 error", cudaGetErrorString(err));
+ 
+	cantBloques = ceil((float)NTrayectorias / (float)BLOCK_SIZE_GR);
+	printf("%s: %d\n", "cantBloques enfilar_variables_libres: ", cantBloques);
+	const dim3 DimGrid_e4(cantBloques, 1);
+	const dim3 DimBlock_e4(BLOCK_SIZE_GR, 1);
+	kernel_resolver_enfilar_variables_libres<<< DimGrid_e4, DimBlock_e4, 0, 0 >>>(d_simplex_array, d_svars, NTrayectorias);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
+	
+	cantBloques = ceil((float)NTrayectorias / (float)BLOCK_SIZE_GR);
+	printf("%s: %d\n", "cantBloques resolver_igualdades: ", cantBloques);
+	const dim3 DimGrid_e5(cantBloques, 1);
+	const dim3 DimBlock_e5(BLOCK_SIZE_GR, 1);
+	kernel_resolver_igualdades<<< DimGrid_e5, DimBlock_e5, 0, 0 >>>(d_simplex_array, d_svars, NTrayectorias);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 5 error", cudaGetErrorString(err));
+ 	
+	cantBloques = ceil((float)NTrayectorias / (float)BLOCK_SIZE_GR);
+	printf("%s: %d\n", "cantBloques reordenar_por_factibilidad: ", cantBloques);
+	const dim3 DimGrid_e6(cantBloques, 1);
+	const dim3 DimBlock_e6(BLOCK_SIZE_GR, 1);
+	kernel_resolver_reordenar_por_factibilidad<<< DimGrid_e6, DimBlock_e6, 0, 0 >>>(d_simplex_array, d_svars, NTrayectorias);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 6 error", cudaGetErrorString(err));
+	
+	const dim3 DimGrid_e7(NTrayectorias, 1);
+	const dim3 DimBlock_e7(BLOCK_SIZE_P_I, 1);
+	kernel_resolver_paso_iterativo<<< DimGrid_e7, DimBlock_e7, 0, 0 >>>(d_simplex_array, d_svars);
+	cudaDeviceSynchronize();
+	
+	err = cudaGetLastError(); 
+	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 7 error", cudaGetErrorString(err));
 
 }
 
+__forceinline__ __device__ int devabs(int x) {
+  return x < 0 ? -x : x;
+}
+
+__forceinline__ __device__ double devabs(double x) {
+  return x < 0 ? -x : x;
+}
+
+
 /**************************************************************************************************************************************************************************************************/
 
-__device__ void resolver_gpu(TSimplexGPUs &simplex) { //,  TSimplexVars &vars) {
-	int res;
-	int cnt_columnasFijadas = 0; // Cantidad de columnas FIJADAS x o y fija encolumnada
-	int result = 0;
-	// int cnt_varfijas = 0; // Cantidad de variables fijadas, esta variable esta en la estructura Simplex
-	// simplex.cnt_varfijas = 0; // Esto viene al cargarse la estructura
-	int cnt_RestrInfactibles = 0;
-	int cnt_variablesLiberadas = 0;
-	//string mensajeDeError;
-	// MAP: Agrego este codigo para calcular las restricciones de igualdad
-	int cnt_igualdades = 0;
-	for (int i = 0; i <= simplex.NRestricciones; i++) {
+__device__ void resolver_etapa_cnt_igcount(TSimplexGPUs &simplex,  TSimplexVars &d_svars) {
+
+	__shared__ int cnt_igualdades;
+	
+	if (threadIdx.x == 0)  {
+		cnt_igualdades = 0;
+		d_svars.res = 1;
+	}
+	
+	__syncthreads();
+	
+	// Mejora aca se puede utilizar una reduccion
+	for (int i = threadIdx.x; i <= simplex.NRestricciones; i += blockDim.x) {
 		if (simplex.flg_y[i] == 2) {
-			cnt_igualdades++;
+			atomicAdd(&cnt_igualdades, 1);
 		}
 	}
 	
-	fijarCajasLaminares(simplex, simplex.cnt_varfijas);
+	__syncthreads();
+	
+	if (threadIdx.x == 0)  {
+		d_svars.cnt_igualdades = cnt_igualdades;
+	}
+}
+
+// fijarCajasLaminares()
+__device__ void resolver_etapa_fijar_cajlam(TSimplexGPUs &simplex,  TSimplexVars &d_svars) {
+	// simplex.cnt_varfijas = 0; // Esto viene al cargarse la estructura
+	// Si abs( cotasup - cotainf ) < AsumaCeroCaja then flg_x := 2
+	// Retorna la cantidad de cajas fijadas.
+	for (int i = threadIdx.x; i < simplex.NVariables; i += blockDim.x) {
+		if (devabs(simplex.flg_x[i] ) < 2) { // No se aplica ni para 2 ni para 3
+			if (devabs(simplex.x_sup[i] - simplex.x_inf[i] ) < CasiCero_CajaLaminar) {
+				if (simplex.flg_x[i] < 0) {
+					simplex.flg_x[i] = -2;
+				} else {
+					simplex.flg_x[i] = 2;
+				}
+				atomicAdd(&simplex.cnt_varfijas, 1);
+			}
+		}
+	}
+}
+
+__device__ void resolver_fijar_variables(TSimplexGPUs &simplex, TSimplexVars &d_svars) {
 
 	// Fijamos las variables que se hayan declarado como constantes.
-	if (!fijarVariables(simplex, simplex.cnt_varfijas, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes)) {
-		//mensajeDeError = "PROBLEMA INFACTIBLE - No fijar las variable Fijas.";
-		//printf("%s\n", mensajeDeError.c_str());
+	if (!fijarVariables(simplex, simplex.cnt_varfijas, d_svars.cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes)) {
 		printf("%s\n", "PROBLEMA INFACTIBLE - No fijar las variable Fijas.");
-		result = -32;
-		return;
+		d_svars.res = -32;
 	}
-
-	if (!enfilarVariablesLibres(simplex, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes, cnt_variablesLiberadas)) {
-		//mensajeDeError = "No fue posible conmutar a filas todas las variables libres";
-		//printf("%s\n", mensajeDeError.c_str());
-		printf("%s\n", "No fue posible conmutar a filas todas las variables libres");
-		result = -33;
-		return;
-	}
-
-	if (resolverIgualdades(simplex, cnt_columnasFijadas, simplex.cnt_varfijas, simplex.cnt_RestriccionesRedundantes, cnt_igualdades) != 1) {
-		//mensajeDeError = "PROBLEMA INFACTIBLE - No logré resolver las restricciones de igualdad.";
-		//printf("%s\n", mensajeDeError.c_str());
-		printf("%s\n", "PROBLEMA INFACTIBLE - No logré resolver las restricciones de igualdad.");
-		result = -31;
-		return;
-	}
-
-	lbl_inicio:
-
-	reordenarPorFactibilidad(simplex, simplex.cnt_RestriccionesRedundantes, cnt_RestrInfactibles); // MAP: cnt_RestrInfactibles es modificada dentro del proc
 	
-	res = 1;
-	while (cnt_RestrInfactibles > 0) {
-		res = pasoBuscarFactible(simplex, cnt_RestrInfactibles, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
+}
 
-		switch (res) {
-			case 0: 
-				if (cnt_RestrInfactibles > 0) {
-					//mensajeDeError = "PROBLEMA INFACTIBLE - Buscando factibilidad";
-					//printf("%s\n", mensajeDeError.c_str());
-					printf("%s\n", "PROBLEMA INFACTIBLE - Buscando factibilidad");
-					result = -10;
-					return;
-				}
-				break;
-			case  -1:
-				//mensajeDeError = "NO encontramos pivote bueno - Buscando Factibilidad";
-				//printf("%s\n", mensajeDeError.c_str());
-				printf("%s\n", "NO encontramos pivote bueno - Buscando Factibilidad");
-				result = -11;
-				return;
-			case -2:
-				//mensajeDeError = "???cnt_infactibles= 0 - Buscando Factibilidad";
-				//printf("%s\n", mensajeDeError.c_str());
-				printf("%s\n", "???cnt_infactibles= 0 - Buscando Factibilidad");
-				result = -12;
-				return;
-		}
+__device__ void resolver_enfilar_variables_libres(TSimplexGPUs &simplex, TSimplexVars &d_svars) {
+	
+	if (d_svars.res != 1) return;
+	
+	if (!enfilarVariablesLibres(simplex, d_svars.cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes, d_svars.cnt_variablesLiberadas)) {
+		printf("%s\n", "No fue posible conmutar a filas todas las variables libres");
+		d_svars.res = -33;
 	}
+	
+}
+
+__device__ void resolver_igualdades(TSimplexGPUs &simplex, TSimplexVars &d_svars) {
+	
+	if (d_svars.res != 1) return;
+ 
+  // printf("%s %i, %i, %i, %i \n", "resolver_igualdades params: ", d_svars.cnt_columnasFijadas, simplex.cnt_varfijas, simplex.cnt_RestriccionesRedundantes, d_svars.cnt_igualdades);
+	
+	if (resolverIgualdades(simplex, d_svars.cnt_columnasFijadas, simplex.cnt_varfijas, simplex.cnt_RestriccionesRedundantes, d_svars.cnt_igualdades) != 1) {
+		printf("%s\n", "No fue posible conmutar a filas todas las variables libres");
+		d_svars.res = -33;
+	}
+	
+}
+
+__device__ void resolver_reordenar_por_factibilidad(TSimplexGPUs &simplex, TSimplexVars &d_svars) {
+	
+	reordenarPorFactibilidad(simplex, simplex.cnt_RestriccionesRedundantes, d_svars.cnt_RestrInfactibles); // MAP: cnt_RestrInfactibles es modificada dentro del proc
+	
+}
+
+__device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_svars) {
+	
+	__shared__ int res;
+	__shared__ int cnt_columnasFijadas; // Cantidad de columnas FIJADAS x o y fija encolumnada
+	__shared__ int cnt_RestrInfactibles;
+ 
+  if (d_svars.res != 1) return;
+  
+  if (threadIdx.x == 0)  {
+		cnt_columnasFijadas = d_svars.cnt_columnasFijadas;
+		cnt_RestrInfactibles = d_svars.cnt_RestrInfactibles;
+    res = 1;
+	}
+	
+	lbl_inicio:
+	
+	__syncthreads();
+ 
+	if (threadIdx.x == 0)  {
+  	while (cnt_RestrInfactibles > 0) {
+  		res = pasoBuscarFactible(simplex, cnt_RestrInfactibles, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
+      
+  		switch (res) {
+  			case 0: 
+  				if (cnt_RestrInfactibles > 0) {
+  					printf("%s\n", "PROBLEMA INFACTIBLE - Buscando factibilidad");
+  					res = -10;
+  					return;
+  				}
+  				break;
+  			case  -1:
+  				printf("%s\n", "NO encontramos pivote bueno - Buscando Factibilidad");
+  				res = -11;
+  				return;
+  			case -2:
+  				printf("%s\n", "???cnt_infactibles= 0 - Buscando Factibilidad");
+  				res = -12;
+  				return;
+  		}
+  	}
+  }
 
 	while (res == 1) {
-		res = darpaso(simplex, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
+		darpaso(simplex, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes, res);
+    __syncthreads();
 		if (res == -1) {
-			//mensajeDeError = "Error -- NO encontramos pivote bueno dando paso";
-			//printf("%s\n", mensajeDeError.c_str());
 			printf("%s\n", "Error -- NO encontramos pivote bueno dando paso");
-			result = -21;
+			res = -21;
 			return;
 		}
 	}
 	  
 	if (res == 2) {
+    //  Trabaja solo el primer hilo
+		if (threadIdx.x == 0)  {
+			reordenarPorFactibilidad(simplex, simplex.cnt_RestriccionesRedundantes, cnt_RestrInfactibles); // MAP: cnt_RestrInfactibles es modificada dentro del proc
+			res = 1;
+		}
 		goto lbl_inicio;
 	}
-		
-	result = res;
-	printf("%s: %d\n", "Finish, result = ", result);
+ 
+  if (threadIdx.x == 0)  d_svars.res = res;
+ 
+  // printf("%s: %d iteraciones %i\n", "Finish, result = ", result, count);
+
 }
-
-
-// Si abs( cotasup - cotainf ) < AsumaCeroCaja then flg_x := 2
-// retorna la cantidad de cajas fijadas.
-__device__ int fijarCajasLaminares(TSimplexGPUs &smp, int &cnt_varfijas) {
-	int res = 0;
-	
-	for (int i =  0; i < smp.NVariables; i++) { // MAP: = for 1 to nc-1
-		// printf("in fijarCajasLaminares: i, flg_x[i], x_inf[i], x_sup[i] = %d, %d, %g, %g \n", i, smp.flg_x[i], smp.x_inf[i], smp.x_sup[i]);
-		if (fabsf(smp.flg_x[i] ) < 2) { // No se aplica ni para 2 ni para 3
-			if (fabsf(smp.x_sup[i] - smp.x_inf[i] ) < CasiCero_CajaLaminar) {
-				if (smp.flg_x[i] < 0) {
-					smp.flg_x[i] = -2;
-				} else {
-					smp.flg_x[i] = 2;
-				}
-				cnt_varfijas++;
-				res++;
-			}
-		}
-	}
-    return res;
-}
-
 
 __device__ void posicionarPrimeraLibre(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_fijadas, int &cnt_columnasFijadas, int &kPrimeraLibre) {
     while ((cnt_fijadas < cnt_varfijas) && 
-		(((smp.top[kPrimeraLibre] < 0) && (fabsf(smp.flg_x[-smp.top[kPrimeraLibre]]) == 2)) || ((smp.top[kPrimeraLibre] > 0) && (fabsf(smp.flg_y[smp.top[kPrimeraLibre]]) == 2)))) {
+		(((smp.top[kPrimeraLibre] < 0) && (devabs(smp.flg_x[-smp.top[kPrimeraLibre]]) == 2)) || ((smp.top[kPrimeraLibre] > 0) && (devabs(smp.flg_y[smp.top[kPrimeraLibre]]) == 2)))) {
 		if (smp.top[kPrimeraLibre] < 0) {
 			cnt_fijadas++;
 		}	
@@ -546,7 +769,7 @@ __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_col
 
 	int kColumnas, mejorColumnaParaCambiarFila, kFor, kFilaAFijar, cnt_fijadas, kPrimeraLibre;
 	double mejorAkFilai;
-	bool buscando, pivoteoConUnaFijada;
+	bool buscando;
 
 	if (cnt_varfijas > 0) {
 		cnt_fijadas = 0;
@@ -562,7 +785,7 @@ __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_col
 					
 					// MAP: Aca grego -1 a flg_x[-top[kColumnas] -1] para obtener el indice que empieza en 0 y top left son 2 vectores indexados en 0 pero que contienen numeros comenzados en 1, por lo tanto el indice real es top[indice] - 1,
 					// esto lo voy a tener que hacer a lo largo y ancho del algoritmo
-					if ((smp.top[kColumnas] < 0) && (fabsf(smp.flg_x[-smp.top[kColumnas] - 1]) == 2)) { 
+					if ((smp.top[kColumnas] < 0) && (devabs(smp.flg_x[-smp.top[kColumnas] - 1]) == 2)) { 
 						// Es una x fija
 						buscando = false;
 					} else {
@@ -588,22 +811,21 @@ __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_col
 		 
 				//Busco en filas
 				for (kFor = kFilaAFijar + 1; kFor < smp.NVariables - 1; kFor++) { // MAP: change index in loop
-					if ((smp.left[kFor] < 0) && (fabsf(smp.flg_x[-smp.left[kFor] - 1]) == 2)) {
+					if ((smp.left[kFor] < 0) && (devabs(smp.flg_x[-smp.left[kFor] - 1]) == 2)) {
 						kFilaAFijar = kFor;
 						break;
 					}
 				}
 
 				mejorColumnaParaCambiarFila = 0; // MAP: antes 1
-				mejorAkFilai = fabsf(smp.mat[kFilaAFijar*(smp.NVariables + 1)]); // MAP: before [1], primera columna ahora es 0, [kFilaAFijar][0]
+				mejorAkFilai = devabs(smp.mat[kFilaAFijar*(smp.NVariables + 1)]); // MAP: before [1], primera columna ahora es 0, [kFilaAFijar][0]
 				for (kColumnas = 1; kColumnas < kPrimeraLibre; kColumnas++) { // MAP: Antes 2 to kPrimeraLibre
-					if (fabsf(smp.mat[kFilaAFijar * (smp.NVariables + 1) + kColumnas]) > mejorAkFilai) {
+					if (devabs(smp.mat[kFilaAFijar * (smp.NVariables + 1) + kColumnas]) > mejorAkFilai) {
 						mejorColumnaParaCambiarFila = kColumnas;
-						mejorAkFilai = fabsf(smp.mat[kFilaAFijar * (smp.NVariables + 1) + kColumnas]);
+						mejorAkFilai = devabs(smp.mat[kFilaAFijar * (smp.NVariables + 1) + kColumnas]);
 					}
 				}
 
-				pivoteoConUnaFijada = false;
 				// dv@20191226 Si el término independiente es nulo, la "restricción" es reduntante
 				// entonces la variable ya había quedado fijada
 				if (mejorAkFilai < AsumaCero) {
@@ -614,18 +836,12 @@ __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_col
 				intercambiar(smp, kFilaAFijar, mejorColumnaParaCambiarFila);
 				cnt_fijadas++;
 				
-				if (!pivoteoConUnaFijada) {
-					// dv@20200115 agrego esto porque no debería cambiar si pivoteó con una fijada
-					if (mejorColumnaParaCambiarFila != kPrimeraLibre) {
-						intercambioColumnas(smp, mejorColumnaParaCambiarFila, kPrimeraLibre);
-					}
-					cnt_columnasFijadas++;
-					kPrimeraLibre--;
-				} else {
-					if (mejorColumnaParaCambiarFila != kPrimeraLibre + 1) { // En el caso de que se pivotee con una columna fija no cambia kPrimeraLibre
-						intercambioColumnas(smp, mejorColumnaParaCambiarFila, kPrimeraLibre + 1);
-					}
+				// dv@20200115 agrego esto porque no debería cambiar si pivoteó con una fijada
+				if (mejorColumnaParaCambiarFila != kPrimeraLibre) {
+					intercambioColumnas(smp, mejorColumnaParaCambiarFila, kPrimeraLibre);
 				}
+				cnt_columnasFijadas++;
+				kPrimeraLibre--;
 			}
 		}
 	}
@@ -648,7 +864,7 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 	// MAP: Se concatenan estos casos en un mismo for
 	for (k = 0; k < kfil; k++) {
 		m = -smp.mat[k * (smp.NVariables + 1) + jcol] * invPiv;
-		if (fabsf(m) > 0) {
+		if (devabs(m) > 0) {
 			for (j = 0; j < jcol; j++) {
 				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j]; 
 			}
@@ -667,7 +883,7 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 	
 	for (k = kfil + 1; k <= smp.NRestricciones; k++) { // MAP: <= pq considera la fila de la funcion z
 		m = -smp.mat[k * (smp.NVariables + 1) + jcol] * invPiv;
-		if (fabsf(m) > 0) {
+		if (devabs(m) > 0) {
 			for (j = 0; j < jcol; j++) {
 				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j]; 
 			}
@@ -698,33 +914,77 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 	smp.top[jcol] = smp.left[kfil];
 	smp.left[kfil] = k;
 
-	// actualizo_iitop(jcol);
-	// actualizo_iileft(kfil);
-
 	return true;
+
  }
+ 
+ __device__ void intercambiar_multihilo(TSimplexGPUs &smp, int kfil, int jcol) {
 
-/*
-// MAP: Agrego los -1 +1 por el cambio de indices CHEQUEAR QUE ES CORRECTO
-void actualizo_iitop(TSimplexGPUs &smp, int k) {
-	// actualizo los indices iix e iiy
-	if (smp.top[k] < 0) {
-		smp.iix[-smp.top[k] - 1] = k + 1;
-	} else {
-		smp.iiy[smp.top[k] - 1] = -k - 1;
-	}
-}
+	double m, piv, invPiv;
+	int k, j;
+	
+	// printf("%s\n", "INTERCAMBIAR MULTIHILO AAAAAAAAAAAAAAA");
 
-// MAP: Agrego los -1 +1 por el cambio de indices CHEQUEAR QUE ES CORRECTO
-void actualizo_iileft(TSimplexGPUs &smp, int k) {
-	// actualizo los indices iix e iiy
-	if (smp.left[k] > 0) {
-		smp.iiy[smp.left[k] - 1]  = k + 1; 
-	} else {
-		smp.iix[-smp.left[k] - 1]  = -k - 1;
+	piv = smp.mat[kfil * (smp.NVariables + 1) + jcol];
+	invPiv = 1 / piv;
+
+	// MAP: POSIBLE MEJORA, en GPU se encargaran hilos diferentes, recorrida por filas
+	// MAP: En el codigo original se separa en 4 casos el mismo codigo, se recorre desde 1 to cnt_RestriccionesRedundantes to kfil - 1  <skipping kfil (fila pivot)> to nf - 1 to nf
+	// MAP: Se concatenan estos casos en un mismo for
+	for (k = threadIdx.x; k < kfil; k+= blockDim.x) {
+		m = -smp.mat[k * (smp.NVariables + 1) + jcol] * invPiv;
+		if (devabs(m) > 0) {
+			for (j = 0; j < jcol; j++) {
+				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j]; 
+			}
+			
+			smp.mat[k * (smp.NVariables + 1) + jcol] = -m;
+			
+			for (j = jcol + 1; j <= smp.NVariables; j++) { // MAP: Antes "to nc"
+				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j];
+			}
+		} else {
+			smp.mat[k * (smp.NVariables + 1) + jcol] = 0; // IMPONGO_CEROS
+		}
 	}
-}
-*/
+	
+	// Salteo la fila kfil
+	
+	for (k = kfil + 1 + threadIdx.x; k <= smp.NRestricciones; k += blockDim.x) { // MAP: <= pq considera la fila de la funcion z
+		m = -smp.mat[k * (smp.NVariables + 1) + jcol] * invPiv;
+		if (devabs(m) > 0) {
+			for (j = 0; j < jcol; j++) {
+				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j]; 
+			}
+			
+			smp.mat[k * (smp.NVariables + 1) + jcol] = -m;
+			
+			for (j = jcol + 1; j <= smp.NVariables; j++) { // MAP: Antes "to nc"
+				smp.mat[k * (smp.NVariables + 1) + j] = smp.mat[k * (smp.NVariables + 1) + j] + m * smp.mat[kfil * (smp.NVariables + 1) + j];
+			}
+		} else {
+			smp.mat[k * (smp.NVariables + 1) + jcol] = 0; // IMPONGO_CEROS
+		}
+	}
+
+	// Completo la fila kfil
+	for (j = threadIdx.x; j < jcol; j += blockDim.x) {
+		smp.mat[kfil * (smp.NVariables + 1) + j] = -smp.mat[kfil * (smp.NVariables + 1) + j] * invPiv;
+	}
+
+	if (threadIdx.x == 0) smp.mat[kfil * (smp.NVariables + 1) + jcol] = invPiv;
+	
+	for (j = jcol + 1 + threadIdx.x; j <= smp.NVariables; j += blockDim.x) { // MAP: Antes jcol + 1 to nc
+		smp.mat[kfil * (smp.NVariables + 1) + j] = -smp.mat[kfil * (smp.NVariables + 1) + j] * invPiv;
+	}
+	
+	if (threadIdx.x == 0) {
+		k = smp.top[jcol];
+		smp.top[jcol] = smp.left[kfil];
+		smp.left[kfil] = k;
+	}
+
+ }
 
 __device__ void intercambioColumnas(TSimplexGPUs &smp, int j1, int j2) {
 
@@ -741,8 +1001,6 @@ __device__ void intercambioColumnas(TSimplexGPUs &smp, int j1, int j2) {
 	smp.top[j1] = smp.top[j2];
 	smp.top[j2] = k;
 
-	// actualizo_iitop(smp, j1);
-	// actualizo_iitop(smp, j2);
 }
 
 __device__ void intercambioFilas(TSimplexGPUs &smp, int k1, int k2) {
@@ -760,9 +1018,6 @@ __device__ void intercambioFilas(TSimplexGPUs &smp, int k1, int k2) {
 	smp.left[k1] = smp.left[k2];
 	smp.left[k2] = j;
 
-	// actualizo_iileft(smp, k1);
-	// actualizo_iileft(smp, k2);
-
 }
 
  // Atención esto funciona porque suponemos que el Simplex está en su estado Natural.
@@ -776,8 +1031,8 @@ __device__ int buscarMejorPivoteEnCol(TSimplexGPUs &smp, int jCol, int iFilaFrom
     res = -1;
     a = 0.0;
 	for (iFil = iFilaFrom; iFil <= iFilaHasta; iFil++) { // MAP: Originalmente iFilaFrom to iFilaHasta, eso no cambia ya que se le pasan los indices ya adaptados a la indexacion desde 0
-		if (fabsf(smp.mat[iFil * (smp.NVariables + 1) + jCol]) > a) {
-			a = fabsf(smp.mat[iFil * (smp.NVariables + 1) + jCol]);
+		if (devabs(smp.mat[iFil * (smp.NVariables + 1) + jCol]) > a) {
+			a = devabs(smp.mat[iFil * (smp.NVariables + 1) + jCol]);
 			res = iFil;
 		}
 	}
@@ -824,7 +1079,7 @@ __device__ int resolverIgualdades(TSimplexGPUs &smp, int &cnt_columnasFijadas, i
 	// Muevo las igualdades que esten en columnas al lado derecho junto con las FIJADAS
 	iColumna = smp.NVariables - cnt_columnasFijadas - 1; // MAP: Indice modificado, cambio nc por smp.NVariables 
 	while ((iColumna >= 0) && (cnt_acomodadas < cnt_igualdades)) {
-		if ((smp.top[iColumna] > 0) && (fabsf(smp.flg_y[smp.top[iColumna] - 1]) == 2)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0
+		if ((smp.top[iColumna] > 0) && (devabs(smp.flg_y[smp.top[iColumna] - 1]) == 2)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0
 			if (iColumna != (smp.NVariables - cnt_columnasFijadas - 1)) { // MAP: Indice modificado, cambio nc por smp.NVariables
 				intercambioColumnas(smp, iColumna, smp.NVariables - cnt_columnasFijadas - 1); // MAP: Indice modificado, cambio nc por smp.NVariables
 			}
@@ -838,7 +1093,7 @@ __device__ int resolverIgualdades(TSimplexGPUs &smp, int &cnt_columnasFijadas, i
 	// ahora reviso las que ya estén declaradas como redundantes a ver si hay
 	// igualdades e incremento el contador de acomodadas.
 	for (iFilaAcomodando = 0; iFilaAcomodando < cnt_RestriccionesRedundantes; iFilaAcomodando++) { // MAP: originalmente 1 to cnt_RestriccionesRedundantes
-		if ((smp.left[iFilaAcomodando] > 0) && (fabsf(smp.flg_y[iFilaAcomodando]) == 2)) {
+		if ((smp.left[iFilaAcomodando] > 0) && (devabs(smp.flg_y[iFilaAcomodando]) == 2)) {
 			//  Es una restricción  y es de igualdad
 			cnt_acomodadas++;
 		}
@@ -856,7 +1111,7 @@ __device__ int resolverIgualdades(TSimplexGPUs &smp, int &cnt_columnasFijadas, i
 	iFilaAcomodando = cnt_RestriccionesRedundantes; // MAP: remuevo el +1 debido a la nueva indexacion desde 0
 
 	while (cnt_acomodadas < cnt_igualdades) {
-		if ((smp.left[iFilaAcomodando] > 0) && (fabsf(smp.flg_y[smp.left[iFilaAcomodando] - 1]) == 2)) { // MAP: Agrego - 1 para mover el indice a la indexacion desde 0
+		if ((smp.left[iFilaAcomodando] > 0) && (devabs(smp.flg_y[smp.left[iFilaAcomodando] - 1]) == 2)) { // MAP: Agrego - 1 para mover el indice a la indexacion desde 0
 			//vc, dv @20200116 decia flg_y[iFilaAcomodando], se fijaba en cualquier lado
 			//  Es una restricción  y es de igualdad
 			if (iFilaLibre != iFilaAcomodando) {
@@ -873,15 +1128,19 @@ __device__ int resolverIgualdades(TSimplexGPUs &smp, int &cnt_columnasFijadas, i
 	nIgualdadesResueltas = 0;
 	nIgualdadesAResolver = iFilaLibre - cnt_RestriccionesRedundantes; // MAP: Antes iFilaLibre - (cnt_RestriccionesRedundantes + 1),  + 1 debido a que iFilaLibre es uno menos que el original
 	nCerosFilas = (int*)malloc((smp.NRestricciones + 1)*sizeof(int)); // MAP: antes setLength(nCerosFilas, nf);
-	nCerosCols = (int*)malloc((smp.NVariables + 1)*sizeof(int));// MAP: antes setLength(nCerosCols, nc);
+	for (int i = 0; i < smp.NRestricciones + 1; i++) nCerosFilas[i] = 0;
+
+  nCerosCols = (int*)malloc((smp.NVariables + 1)*sizeof(int));// MAP: antes setLength(nCerosCols, nc);
+  for (int i = 0; i < smp.NVariables + 1; i++) nCerosCols[i] = 0;
+  
 	while (nIgualdadesResueltas < nIgualdadesAResolver) {
 		//    res:= pasoBuscarFactibleIgualdad( cnt_RestriccionesRedundantes + 1 + nIgualdadesResueltas );
 		//    res:= pasoBuscarFactibleIgualdad2( cnt_RestriccionesRedundantes + 1 + nIgualdadesResueltas );
 		//    res:= pasoBuscarFactibleIgualdad3( nIgualdadesAResolver - nIgualdadesResueltas);
 
-		// printf("Launch  pasoBuscarFactibleIgualdad4 with:  %d, %d, %d, %d\n", nCerosFilas[0], nCerosCols[0], cnt_columnasFijadas, cnt_RestriccionesRedundantes);
+		// printf("Launch  pasoBuscarFactibleIgualdad4 with:  %d, %d, %d, %d, %d\n", nIgualdadesAResolver - nIgualdadesResueltas, nCerosFilas[0], nCerosCols[0], cnt_columnasFijadas, cnt_RestriccionesRedundantes);
 		res = pasoBuscarFactibleIgualdad4(smp, nIgualdadesAResolver - nIgualdadesResueltas, nCerosFilas, nCerosCols, cnt_columnasFijadas, cnt_RestriccionesRedundantes);
-		
+   
 		if (res ==1) {
 			nIgualdadesResueltas = nIgualdadesResueltas + 1;
 			cnt_columnasFijadas++;
@@ -964,7 +1223,7 @@ __device__ int pasoBuscarFactibleIgualdad4(TSimplexGPUs &smp, int nIgualdadesNoR
 	// MAP: remuevo el +1 debido a la nueva indexacion desde 0, originalmente cnt_RestriccionesRedundantes + 1 to cnt_RestriccionesRedundantes + nIgualdadesNoResueltas
 	for (iFila = cnt_RestriccionesRedundantes; iFila < cnt_RestriccionesRedundantes + nIgualdadesNoResueltas; iFila++) { 
 		for (iColumna = 0; iColumna <columnasLibres; iColumna++) { // MAP: muevo el indice una lugar hacia atras para considerar el cambio de indexacion desde 0
-			m = abs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]);
+			m = devabs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]);
 			if (m < AsumaCero) {
 				nCerosFilas[iFila]++;
 				nCerosCols[iColumna]++;
@@ -979,7 +1238,7 @@ __device__ int pasoBuscarFactibleIgualdad4(TSimplexGPUs &smp, int nIgualdadesNoR
 	// Termino de contar la cantidad de ceros en columnas con el resto de las filas
 	for (iFila = cnt_RestriccionesRedundantes + nIgualdadesNoResueltas; iFila < smp.NRestricciones; iFila++) { // MAP: cnt_RestriccionesRedundantes + nIgualdadesNoResueltas + 1 to nf - 1
 		for (iColumna = 0; iColumna < columnasLibres - 1; iColumna++) { // MAP: Originalmente 1 to columnasLibres - 1
-			if (abs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]) < AsumaCero) {
+			if (devabs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]) < AsumaCero) {
 				nCerosCols[iColumna]++;
 			}
 		}
@@ -988,7 +1247,7 @@ __device__ int pasoBuscarFactibleIgualdad4(TSimplexGPUs &smp, int nIgualdadesNoR
 	if (maxVal > CasiCero_Simplex) {
 		for (iFila = cnt_RestriccionesRedundantes; iFila < cnt_RestriccionesRedundantes + nIgualdadesNoResueltas; iFila++) { // MAP: Originalmente cnt_RestriccionesRedundantes + 1 to cnt_RestriccionesRedundantes +	nIgualdadesNoResueltas
 			for (iColumna = 0; iColumna < columnasLibres; iColumna++) { // MAP: Originalmente 1 to columnasLibres
-				if (abs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]) * 10 >= maxVal) {
+				if (devabs(smp.mat[iFila * (smp.NVariables + 1) + iColumna]) * 10 >= maxVal) {
 					// Lo considero como posible pivote
 					if ((nCerosFilas[filaPiv] + nCerosCols[colPiv]) < (nCerosFilas[iFila] + nCerosCols[iColumna])) {
 						filaPiv = iFila;
@@ -1094,16 +1353,14 @@ __device__ void cambiar_borde_de_caja(TSimplexGPUs &smp, int k_fila) {
 	
 	smp.mat[k_fila * (smp.NVariables + 1) + smp.NVariables] = smp.x_sup[ix] - smp.mat[k_fila * (smp.NVariables + 1) + smp.NVariables]; // MAP: Cambio nc por smp.NVariables, dado que nc = smp.NVariables - 1 entonce ajusta el indice
 
-	if (fabsf(smp.flg_x[ix]) != 1) {
+	if (devabs(smp.flg_x[ix]) != 1) {
 		printf("%s\n", "mmmm ... porqué?");
 	}
 	smp.flg_x[ix] = -smp.flg_x[ix];
   
 }
 
-
-__device__ int pasoBuscarFactible(TSimplexGPUs &smp, int &cnt_RestrInfactibles, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes) {
-	
+__device__ int pasoBuscarFactible(TSimplexGPUs &smp, int &cnt_RestrInfactibles, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes) {	
 	int pFilaOpt, ppiv, qpiv, ix, res;
 	double rval;
 	bool filaFantasma, colFantasma;
@@ -1241,11 +1498,11 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 	pivote elegido no la viole*/
 
 	ix = -smp.top[q];
-	if ((ix > 0) && ( fabsf(smp.flg_x[ix - 1] ) == 2)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0
+	if ((ix > 0) && ( devabs(smp.flg_x[ix - 1] ) == 2)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0
 		printf("%s\n", "OPATROPA!");
 	}
 
-	if ((ix > 0) and ( fabsf(smp.flg_x[ix - 1] ) == 1 )) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0 
+	if ((ix > 0) and ( devabs(smp.flg_x[ix - 1] ) == 1 )) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0 
 		// en la columna q hay una x con manejo de cota superior
 		colFantasma = true;
 		p = q;
@@ -1268,7 +1525,7 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 		a_iq = smp.mat[i * (smp.NVariables + 1) + q];
 		if (a_iq >  CasiCero_Simplex) { // Si es positivo, verificamos si se trata de una x y entonces agregamos la fantasma.
 			ix = -smp.left[i];
-			if ((ix > 0) && (fabsf(smp.flg_x[ix - 1]) ==1)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0 
+			if ((ix > 0) && (devabs(smp.flg_x[ix - 1]) ==1)) { // MAP: Agrego -1 para correr el indice a la indexacion desde 0 
 				// La variable en la fila i tiene cota superior, hay que probar con el cambio de variable
 				a_iq = -a_iq;
 				a_it = smp.x_sup[ix - 1] - smp.mat[i * (smp.NVariables + 1) + smp.NVariables]; // MAP: Cambio nc por smp.NVariables, dado que nc = smp.NVariables - 1 entonce ajusta el indice
@@ -1287,7 +1544,7 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 
 
 		if (esCandidato) { // Considero el coeficiente para elegir el pivote
-			abs_a_pq = abs(smp.mat[i * (smp.NVariables + 1) + q]); // MAP: Cambio abs( e( i, q ) ); por abs(smp.mat[i][q]));
+			abs_a_pq = devabs(smp.mat[i * (smp.NVariables + 1) + q]); // MAP: Cambio abs( e( i, q ) ); por abs(smp.mat[i][q]));
 			/*
 			se supone que a_iq < 0 y a_iq_DelMejor < 0 pues sino no son candidatos.
 			El término independiente de cualquier fila k, se transformará al usar a_iq como pivote
@@ -1333,16 +1590,16 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 		i = kmax;
 		ix = -smp.left[kmax];
 		if (ix > 0) {  // Es una fila "x"
-			if ( fabsf(smp.flg_x[ix - 1] ) == 1) {   // tiene manejo de cota superior
+			if ( devabs(smp.flg_x[ix - 1] ) == 1) {   // tiene manejo de cota superior
 				// agregamos su fila fantasma como una más candidata a pivotear y a controlar
 				// su factibilidad en caso de pivotear con otra.
 				// En la fila kmax el aiq es positivo, pues fue elegido con locate_zpos
 				//      aiq:= -e(kmax, q);
 				a_iq = -smp.mat[kmax * (smp.NVariables + 1) + q];
 				a_it = smp.x_sup[ix - 1] - smp.mat[kmax * (smp.NVariables + 1) + smp.NVariables]; // MAP: Cambio nc por smp.NVariables, dado que nc = smp.NVariables - 1 entonce ajusta el indice
-				abs_a_pq = abs(a_iq);
+				abs_a_pq = devabs(a_iq);
 				if (a_iq >= 0) printf("%s\n", "aiq >= 0 en tsimplex.mejorpivote");
-				//assert(a_iq < 0);
+				assert(a_iq < 0);
 				// static_assert(a_iq < 0, "aiq >= 0 en tsimplex.mejorpivote");
 				//      b_:= x_sup.pv[ix] - e(kmax, nc);
 				xFantasma_fila = true;
@@ -1367,7 +1624,7 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 		a_iq = smp.mat[kmax * (smp.NVariables + 1) + q];
 		a_it = smp.mat[kmax * (smp.NVariables + 1) + smp.NVariables]; // MAP: Cambio nc por smp.NVariables, dado que nc = smp.NVariables - 1 entonce ajusta el indice
 		xFantasma_fila = false;
-		abs_a_pq = abs(a_iq);
+		abs_a_pq = devabs(a_iq);
 		if (p < 0) { // Es el primer candidato
 			capturarElMejor(a_iq_DelMejor, a_it_DelMejor, p, filaFantasma, colFantasma, a_iq, a_it, i, xFantasma_fila);
 		} else if (( a_it * a_iq_DelMejor ) < ( a_it_DelMejor * a_iq)) { // OJO, observar que es un "<"
@@ -1382,7 +1639,6 @@ __device__ int mejorpivote(TSimplexGPUs &smp, int q, int kmax, bool &filaFantasm
 	return p;
 }
 
-
 __device__ bool cambio_var_cota_sup_en_columna(TSimplexGPUs &smp, int q) {
 
 	int ix, kfil;
@@ -1392,7 +1648,7 @@ __device__ bool cambio_var_cota_sup_en_columna(TSimplexGPUs &smp, int q) {
 	res = false;
 	ix = -smp.top[q];
 	// MAP: Agrego -1 para correr el indice a la indexacion desde 0 
-	if ((ix > 0) && (fabsf(smp.flg_x[ix - 1]) == 1)) { // Corresponde a una x con cota sup
+	if ((ix > 0) && (devabs(smp.flg_x[ix - 1]) == 1)) { // Corresponde a una x con cota sup
 		// if abs(flg_x[ix] ) <> 1  then  writeln( 'mmmmm ' );
 
 		// cambio de variable en la misma columna
@@ -1418,7 +1674,6 @@ __device__ bool cambio_var_cota_sup_en_columna(TSimplexGPUs &smp, int q) {
 	return res;
 }
 
-
 __device__ int locate_qOK(TSimplexGPUs &smp, int p, int jhasta, int jti, int cnt_RestriccionesRedundantes) {
 	int mejorq, q;
 	double max_apq, apq;
@@ -1435,7 +1690,6 @@ __device__ int locate_qOK(TSimplexGPUs &smp, int p, int jhasta, int jti, int cnt
 	return mejorq;
 }
 
-
 /*
 Esta función retorna true si la columna q soluciona la infactibilidad
 de la fila p. Se supone que (jti) es la columna de los términos constantes
@@ -1445,7 +1699,7 @@ El valor retornado apq, es e(p,q) y puede usarse para
 elegir el q que devuelva el valor más grande para disminuir los
 errores numéricos.
 */
-__device__ bool test_qOK(TSimplexGPUs &smp, int p, int q, int jti, double &apq, int cnt_RestriccionesRedundantes) {
+__device__ bool test_qOK(TSimplexGPUs &smp, int p, int q, int jti, double &apq, int cnt_RestriccionesRedundantes) {	
 	int k, ix;
 	double alfa_p, akq,
 		nuevo_ti;
@@ -1453,7 +1707,7 @@ __device__ bool test_qOK(TSimplexGPUs &smp, int p, int q, int jti, double &apq, 
 	// apq:= e(p, q);
 	apq = smp.mat[p * (smp.NVariables + 1) + q];
 	// if ( apq  <= AsumaCero) then
-	if (abs(apq) <= AsumaCero) { // rch@202012081043 agrego el abs()
+	if (devabs(apq) <= AsumaCero) { // rch@202012081043 agrego el abs()
 		return false;
 	} else {
 		// alfa_p:= -e( p, jti ) / apq;
@@ -1493,43 +1747,58 @@ __device__ bool test_qOK(TSimplexGPUs &smp, int p, int q, int jti, double &apq, 
 	}
 }
 
+__device__ void darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes, int &res) {
 
-__device__ int darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_RestriccionesRedundantes) {
+  __shared__ int ppiv;
+	__shared__ int qpiv;
+	__shared__ bool filaFantasma;
+	__shared__ bool colFantasma;
+	__shared__ bool cambio_var_cota_sup_en_col_result;
 
-	int ppiv, qpiv,
-		res;
-	bool filaFantasma, colFantasma;
-
-	// cnt_paso++;
-	qpiv = locate_zpos(smp, smp.NRestricciones, cnt_columnasFijadas); // MAP: Cambio nf por smp.NRestricciones, dado que nf = smp.NRestricciones - 1 entonce ajusta el indice
+	// MAP: Cambio nf por smp.NRestricciones, dado que nf = smp.NRestricciones - 1 entonce ajusta el indice
+	if (threadIdx.x == 0)  qpiv = locate_zpos(smp, smp.NRestricciones, cnt_columnasFijadas); 
+  __syncthreads();
+  
 	if (qpiv >= 0) { // MAP: Antes > 0, pero con el corrimiento de indice queda >=
-		ppiv = mejorpivote(smp, qpiv, smp.NRestricciones, filaFantasma, colFantasma, false, cnt_RestriccionesRedundantes); // MAP: Cambio nf por smp.NRestricciones, dado que nf = smp.NRestricciones - 1 entonce ajusta el indice
-		if (ppiv < 0) { // MAP: Antes < 1, pero con el corrimiento de indice queda < 0
-			return -1;
+		
+    // MAP: Cambio nf por smp.NRestricciones, dado que nf = smp.NRestricciones - 1 entonce ajusta el indice
+    if (threadIdx.x == 0)  ppiv = mejorpivote(smp, qpiv, smp.NRestricciones, filaFantasma, colFantasma, false, cnt_RestriccionesRedundantes); 
+		__syncthreads();
+   
+    if (ppiv < 0) { // MAP: Antes < 1, pero con el corrimiento de indice queda < 0
+			if (threadIdx.x == 0) res = -1;
+      return;
 		}
 		
 		if (!colFantasma) {
-			if  (!intercambiar(smp, ppiv, qpiv)) {
-				return -1;
-			}
+      intercambiar_multihilo(smp, ppiv, qpiv);
+      __syncthreads();
 			
 			if (filaFantasma) {
-				if (!cambio_var_cota_sup_en_columna(smp, qpiv)) {
-					return -1;
+				if (threadIdx.x == 0) {
+					cambio_var_cota_sup_en_col_result = cambio_var_cota_sup_en_columna(smp, qpiv);
+				}
+        __syncthreads();
+				
+				if (!cambio_var_cota_sup_en_col_result) {
+					if (threadIdx.x == 0) res = -1;
+					return; 
 				}
 			}
 			res = 1;
 		} else {
 			if (ppiv != qpiv) printf("%s\n", "Si Es FantasmaDeCol tenía que ser ppiv = qpiv");
-			//assert(ppiv == qpiv);
-			//static_assert(ppiv = qpiv , "Si Es FantasmaDeCol tenía que ser ppiv = qpiv");
-			cambio_var_cota_sup_en_columna(smp, ppiv);
-			res = 1;
+			
+      assert(ppiv == qpiv);
+			
+      //static_assert(ppiv = qpiv , "Si Es FantasmaDeCol tenía que ser ppiv = qpiv");
+      if (threadIdx.x == 0) {
+			  cambio_var_cota_sup_en_columna(smp, ppiv);
+        res = 1;
+      }
 		} 
 	} else {
-		res = 0; // ShowMessage('No encontre z - positivo ' );
+		if (threadIdx.x == 0) res = 0; // ShowMessage('No encontre z - positivo ' );
 	}
-		
-	return res;
+	
 }
-
