@@ -922,8 +922,6 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 
 	double m, piv, invPiv;
 	int k, j;
-	
-	// printf("%s\n", "INTERCAMBIAR MULTIHILO AAAAAAAAAAAAAAA");
 
 	piv = smp.mat[kfil * (smp.NVariables + 1) + jcol];
 	invPiv = 1 / piv;
@@ -947,7 +945,7 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 			smp.mat[k * (smp.NVariables + 1) + jcol] = 0; // IMPONGO_CEROS
 		}
 	}
-	
+ 
 	// Salteo la fila kfil
 	
 	for (k = kfil + 1 + threadIdx.x; k <= smp.NRestricciones; k += blockDim.x) { // MAP: <= pq considera la fila de la funcion z
@@ -966,7 +964,9 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 			smp.mat[k * (smp.NVariables + 1) + jcol] = 0; // IMPONGO_CEROS
 		}
 	}
-
+ 
+  __syncthreads();
+ 
 	// Completo la fila kfil
 	for (j = threadIdx.x; j < jcol; j += blockDim.x) {
 		smp.mat[kfil * (smp.NVariables + 1) + j] = -smp.mat[kfil * (smp.NVariables + 1) + j] * invPiv;
@@ -977,7 +977,7 @@ __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol) {
 	for (j = jcol + 1 + threadIdx.x; j <= smp.NVariables; j += blockDim.x) { // MAP: Antes jcol + 1 to nc
 		smp.mat[kfil * (smp.NVariables + 1) + j] = -smp.mat[kfil * (smp.NVariables + 1) + j] * invPiv;
 	}
-	
+ 
 	if (threadIdx.x == 0) {
 		k = smp.top[jcol];
 		smp.top[jcol] = smp.left[kfil];
@@ -1771,6 +1771,7 @@ __device__ void darpaso(TSimplexGPUs &smp, int cnt_columnasFijadas, int cnt_Rest
 		}
 		
 		if (!colFantasma) {
+      //if (threadIdx.x == 0) intercambiar(smp, ppiv, qpiv);
       intercambiar_multihilo(smp, ppiv, qpiv);
       __syncthreads();
 			
