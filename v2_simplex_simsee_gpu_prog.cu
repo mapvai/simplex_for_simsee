@@ -51,7 +51,7 @@ __forceinline__ __device__ double devabs(double x);
 __device__ void posicionarPrimeraLibre(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_fijadas, int &cnt_columnasFijadas, int &kPrimeraLibre) ; // Esta funcion es interna, no se necesita declarar aca?
 __device__ bool fijarVariables(TSimplexGPUs &smp, int cnt_varfijas, int &cnt_columnasFijadas, int cnt_RestriccionesRedundantes);
 __device__ bool intercambiar(TSimplexGPUs &smp, int kfil, int jcol);
-//__device__ void intercambiar_multihilo(TSimplexGPUs &smp, int kfil, int jcol);
+__device__ void intercambiar_multihilo(TSimplexGPUs &smp, int kfil, int jcol);
 __device__ void intercambioColumnas(TSimplexGPUs &smp, int j1, int j2);
 __device__ void intercambioFilas(TSimplexGPUs &smp, int k1, int k2);
 __device__ int buscarMejorPivoteEnCol(TSimplexGPUs &smp, int jCol, int iFilaFrom, int iFilaHasta);
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
 	
 	copy_mem_back(simplex_array, h_simplex_array, d_simplex_array, NTrayectorias);
  
-  printTSimplexGPUs(simplex_array[0]);
+  printTSimplexGPUs(simplex_array[NTrayectorias - 1]);
 	
 	free_mem(h_simplex_array, d_simplex_array, d_svars, NTrayectorias);
 	free(h_simplex_array);
@@ -691,7 +691,8 @@ __device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_s
 	__shared__ int res;
 	__shared__ int cnt_columnasFijadas; // Cantidad de columnas FIJADAS x o y fija encolumnada
 	__shared__ int cnt_RestrInfactibles;
- 
+  // int count = 0;
+  
   if (d_svars.res != 1) return;
   
   if (threadIdx.x == 0)  {
@@ -706,6 +707,7 @@ __device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_s
  
 	if (threadIdx.x == 0)  {
   	while (cnt_RestrInfactibles > 0) {
+      // count++; 
   		res = pasoBuscarFactible(simplex, cnt_RestrInfactibles, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes);
       
   		switch (res) {
@@ -713,28 +715,31 @@ __device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_s
   				if (cnt_RestrInfactibles > 0) {
   					printf("%s\n", "PROBLEMA INFACTIBLE - Buscando factibilidad");
   					res = -10;
-  					return;
   				}
   				break;
   			case  -1:
   				printf("%s\n", "NO encontramos pivote bueno - Buscando Factibilidad");
   				res = -11;
-  				return;
   			case -2:
   				printf("%s\n", "???cnt_infactibles= 0 - Buscando Factibilidad");
   				res = -12;
-  				return;
   		}
   	}
   }
-
+  
+  __syncthreads();
+  
+  // if (threadIdx.x == 0 && blockIdx.x % 10 == 0) printf("pasoBuscarFactible en block %i, result = %d iteraciones %i\n", blockIdx.x, res, count);
+  
+  // count = 0;
+  
 	while (res == 1) {
 		darpaso(simplex, cnt_columnasFijadas, simplex.cnt_RestriccionesRedundantes, res);
+    // count++;
     __syncthreads();
 		if (res == -1) {
 			printf("%s\n", "Error -- NO encontramos pivote bueno dando paso");
 			res = -21;
-			return;
 		}
 	}
 	  
@@ -749,7 +754,7 @@ __device__ void resolver_paso_iterativo(TSimplexGPUs &simplex, TSimplexVars &d_s
  
   if (threadIdx.x == 0)  d_svars.res = res;
  
-  // printf("%s: %d iteraciones %i\n", "Finish, result = ", result, count);
+  // if (threadIdx.x == 0 && blockIdx.x % 10 == 0) printf("Finish block %i, result = %d iteraciones %i\n", blockIdx.x, res, count);
 
 }
 

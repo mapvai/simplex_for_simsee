@@ -2,13 +2,18 @@
 #include <math.h>
 #include "simplex_big_m.h"
 
+#include "util.h"
+#include "cuda.h"
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
 __constant__ double CasiCero_Simplex = 1.0E-7;
 
 __constant__ double M = 1.0E+15; // 1.0E+150; 100; //sqrt(MaxNReal);
 const double eMe = 1.0E+15; // 1.0E+150; 100;
 
-const int MAX_VARS = 512; // Esto es usado para pedir shared memory
-const int MAX_RES = 512; // Esto es usado para pedir shared memory
+const int MAX_VARS = 400; // Esto es usado para pedir shared memory
+const int MAX_RES = 200; // Esto es usado para pedir shared memory
 
 // 8 * 32 = 256
 const int BLOCK_SIZE_E_1X = 32;  // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#thread-hierarchy the arrange of the warp in the block is giving for a two-dimensional block of size (Dx, Dy),the thread ID of a thread of index (x, y) is (x + y Dx)
@@ -223,7 +228,6 @@ void resolver_ejemplo2trasnform() {
 */	
 	TDAOfSimplexGPUs d_simplex_array; 
 	TDAOfSimplexGPUs h_simplex_array;
-	cudaError_t err;
 	
 	double tabl[] = {
 		3, 3, 15, 0, -1, -3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 
@@ -274,18 +278,7 @@ void resolver_ejemplo2trasnform() {
 	TDAOfSimplexGPUs simplex_array = (TabloideGPUs*)malloc(NTrayectorias*sizeof(TabloideGPUs));
 	simplex_array[0] = tabloide;
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
 	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-
-	int largo, alto;
-	for (int kTrayectoria = 0; kTrayectoria < NTrayectorias; kTrayectoria++) {
-		largo = (int) simplex_array[kTrayectoria][2];
-		alto = (int) simplex_array[kTrayectoria][largo + 1] + 6;
-		cudaMemcpy(simplex_array[kTrayectoria], h_simplex_array[kTrayectoria], largo*alto*sizeof(double), cudaMemcpyDeviceToHost);
-		err = cudaGetLastError(); 
-		if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
-	}
 	
 	TSimplexGPUs smp = desestructurarTabloide(simplex_array[0]);
 	
@@ -326,8 +319,6 @@ void resolver_ejemplo_caso_libro() {
 		simplex_array[t] = tabloide;
 	}
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
 	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
 	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
@@ -354,8 +345,6 @@ void resolver_ejemplo_caso_tipo() {
 	for (unsigned int t = 0; t < NTrayectorias; t++) {
 		simplex_array[t] = tabloide;
 	}
-	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
 	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
@@ -387,8 +376,6 @@ void resolver_ejemplo_caso_tipo_grande() {
 		simplex_array[t] = tabloide;
 	}
 	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
-	
 	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
 	smp = desestructurarTabloide(simplex_array[NTrayectorias - 1]);
@@ -417,8 +404,6 @@ void resolver_ejemplo_caso_tipo_extra_grande() {
 	for (unsigned int t = 0; t < NTrayectorias; t++) {
 		simplex_array[t] = tabloide;
 	}
-	
-	ini_mem(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
 	resolver_cuda(simplex_array, d_simplex_array, h_simplex_array, NTrayectorias);
 	
@@ -476,6 +461,11 @@ void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_
 	
 	cudaError_t err;
 	
+	{CLK_POSIX_INIT;
+	CLK_POSIX_START;	
+	CLK_CUEVTS_INIT;
+	CLK_CUEVTS_START;
+	
 	// Ejecuto los kernels
 	const dim3 DimGrid_e1(NTrayectorias, 1);
 	const dim3 DimBlock_e1(BLOCK_SIZE_E_1X, BLOCK_SIZE_E_1Y);
@@ -511,6 +501,13 @@ void resolver_cuda(TDAOfSimplexGPUs &simplex_array, TDAOfSimplexGPUs &d_simplex_
 	cudaDeviceSynchronize();
 	err = cudaGetLastError(); 
 	if (err != cudaSuccess) printf("%s: %s\n", "CUDA 4 error", cudaGetErrorString(err));
+	
+	CLK_CUEVTS_STOP;
+	CLK_CUEVTS_ELAPSED("v2_simplex_simsee_prog: ");
+	cudaDeviceSynchronize();	
+	CLK_POSIX_STOP;
+	CLK_POSIX_ELAPSED("v2_simplex_simsee_prog: ");
+	}
 	
 	cudaMemcpy(h_simplex_array, d_simplex_array, NTrayectorias*sizeof(TabloideGPUs), cudaMemcpyDeviceToHost);
 
@@ -923,7 +920,7 @@ __device__ void locate_min_ratio(TSimplexGPUs &smp, int zpos, int &qpos) {
 	/*
 	// Reduccion Sequencial
 	unsigned int thds_in_block = blockDim.y*blockDim.x;
-	for (unsigned int s = thds_in_block/2; s > 0; s >>= 1) {
+	for (unsigned int s = thds_in_block; s > 0; s >>= 1) {
 		if (thd_indx < s && (thd_indx + s) < smp.rest_fin) {
 			if (apy_indx[thd_indx + s] >= 0 &&  apy_acc[thd_indx + s]  > CasiCero_Simplex &&
 				(apy_indx[thd_indx] < 0 || apy_acc[thd_indx + s] < apy_acc[thd_indx])
